@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Arena: Survival Race</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="title">AI Arena: Survival Race (turrets)</div>
+
+    <div class="controls">
+      <button id="btnReset">Reset</button>
+      <button id="btnPause">Pause</button>
+
+      <label>Seed <input id="seed" value="1337" size="6" /></label>
+
+      <label>Bot A
+        <select id="botA">
+          <option value="./bots/botA.js">botA.js</option>
+          <option value="./bots/botB.js">botB.js</option>
+        </select>
+      </label>
+
+      <label>Bot B
+        <select id="botB">
+          <option value="./bots/botB.js">botB.js</option>
+          <option value="./bots/botA.js">botA.js</option>
+        </select>
+      </label>
+      
+      <label style="margin-left:12px;">Debug:
+        <label><input type="checkbox" id="dbgRays" /> Rays</label>
+        <label><input type="checkbox" id="dbgHits" /> Ray hits</label>
+        <label><input type="checkbox" id="dbgInfo" /> Car info</label>
+      </label>
+      <label style="margin-left:8px;"> <input type="checkbox" id="dbgLogInput" /> Log input once</label>
+      
+      <div style="margin-top:8px; font-size:11px; color:#888;">
+        Камера: прокрути колесо для zoom, правый клик+drag для pan
+        <button id="btnZoomReset" style="margin-left:4px; padding:2px 6px; font-size:10px;">Сброс вида</button>
+      </div>
+    </div>
+  </div>
+
+   <div class="wrap">
+     <canvas id="c" width="1280" height="720"></canvas>
+
+     <div class="side">
+       <div class="panel">
+         <div class="h">Rules</div>
+         <div class="p">Win: reach finish OR destroy opponent.</div>
+         <div class="p">Turrets shoot both.</div>
+         <div class="p">Bot API: decide(input) → { throttle, steer, shoot, aimAngle }</div>
+       </div>
+
+       <div class="panel">
+         <div class="h">Fast Sim</div>
+         <label>Num matches <input id="simMatches" value="100" size="4" type="number" min="1" max="10000" /></label>
+         <label>Speed <input id="simSpeed" value="10" size="3" type="number" min="1" max="100" /></label>
+         <button id="btnSimStart" style="margin-top:6px;">Start</button>
+         <button id="btnSimStop" disabled>Stop</button>
+         <pre id="simResults" style="font-size:11px; margin-top:6px;"></pre>
+       </div>
+
+       <div class="panel">
+         <div class="h">Status</div>
+         <pre id="status"></pre>
+       </div>
+     </div>
+   </div>  <script type="module" src="./main.js"></script>
+</body>
+</html>
