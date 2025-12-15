@@ -23,8 +23,14 @@ async function loadBot(path) {
 }
 
 async function boot() {
+  // Check that bots are different
   const botAPath = botAEl.value;
   const botBPath = botBEl.value;
+
+  if (botAPath === botBPath) {
+    statusEl.textContent = "ERROR: Bot A and Bot B must be different scripts!";
+    return;
+  }
 
   const [botA, botB] = await Promise.all([loadBot(botAPath), loadBot(botBPath)]);
 
@@ -34,11 +40,18 @@ async function boot() {
   let renderer = null;
 
   function startRun() {
-    // preserve seed value from the input field (do not reset it)
-    const seed = Math.random() * 0xFFFFFFFF >>> 0;
+    // Generate new seed and update UI
+    const newSeed = Math.random() * 0xFFFFFFFF >>> 0;
+    seedEl.value = newSeed;
+
+    // Determine bot order based on seed (even = normal, odd = swapped)
+    const shouldSwap = (newSeed % 2) === 1;
+    const [bot0, bot1, name0, name1] = shouldSwap 
+      ? [botB, botA, "B", "A"] 
+      : [botA, botB, "A", "B"];
 
     // recreate game and renderer
-    game = new Game({ seed, bots: [botA, botB], botNames: ["A", "B"] });
+    game = new Game({ seed: newSeed, bots: [bot0, bot1], botNames: [name0, name1] });
     renderer = new Renderer(canvas);
 
     // initialize renderer debug flags from UI
@@ -46,9 +59,11 @@ async function boot() {
     const dbgHits = document.getElementById('dbgHits');
     const dbgInfo = document.getElementById('dbgInfo');
     const dbgLogInput = document.getElementById('dbgLogInput');
+    const camAutoFollow = document.getElementById('camAutoFollow');
     renderer.debug.rays = dbgRays?.checked ?? false;
     renderer.debug.rayHits = dbgHits?.checked ?? false;
     renderer.debug.info = dbgInfo?.checked ?? false;
+    renderer.autoFollow = camAutoFollow?.checked ?? true;
     window.DEBUG_LOG_INPUT = !!dbgLogInput?.checked;
 
     // wire checkboxes to toggle debug rendering live
@@ -56,6 +71,7 @@ async function boot() {
     if (dbgHits) dbgHits.onchange = () => renderer.debug.rayHits = dbgHits.checked;
     if (dbgInfo) dbgInfo.onchange = () => renderer.debug.info = dbgInfo.checked;
     if (dbgLogInput) dbgLogInput.onchange = () => { window.DEBUG_LOG_INPUT = dbgLogInput.checked; };
+    if (camAutoFollow) camAutoFollow.onchange = () => renderer.autoFollow = camAutoFollow.checked;
 
     // Camera/zoom controls
     const handleWheel = (e) => {
@@ -134,7 +150,12 @@ async function boot() {
 
   // wire buttons
   btnReset.onclick = () => {
-    // restart simulation without reloading the page so seed input stays as the user set it
+    // Check bots are different before reset
+    if (botAEl.value === botBEl.value) {
+      statusEl.textContent = "ERROR: Bot A and Bot B must be different scripts!";
+      return;
+    }
+    // restart simulation with new seed
     stopRun();
     startRun();
   };
@@ -154,6 +175,16 @@ async function boot() {
     paused = !paused;
     btnPause.textContent = paused ? "Resume" : "Pause";
   };
+
+  // Validate bot selection on change
+  const validateBotSelection = () => {
+    if (botAEl.value === botBEl.value) {
+      statusEl.textContent = "ERROR: Bot A and Bot B must be different scripts!";
+    }
+  };
+
+  botAEl.onchange = validateBotSelection;
+  botBEl.onchange = validateBotSelection;
 
   // Fast simulation mode
   const btnSimStart = document.getElementById('btnSimStart');
@@ -180,7 +211,14 @@ async function boot() {
     for (let m = 0; m < numMatches && simRunning; m++) {
       // random seed for each match
       const seed = Math.random() * 0xFFFFFFFF >>> 0;
-      const g = new Game({ seed, bots: [botA, botB], botNames: ["A", "B"] });
+      
+      // Swap bots based on seed (even = normal, odd = swapped)
+      const shouldSwap = (seed % 2) === 1;
+      const [bot0, bot1, name0, name1] = shouldSwap 
+        ? [botB, botA, "B", "A"] 
+        : [botA, botB, "A", "B"];
+      
+      const g = new Game({ seed, bots: [bot0, bot1], botNames: [name0, name1] });
 
       let t = 0;
       // run match at speed multiplier (skip renders)
@@ -190,14 +228,17 @@ async function boot() {
         }
       }
 
-      // record result
+      // record result - track by bot script, not position
+      // Position of original botA in game (0 if not swapped, 1 if swapped)
+      const botAActualId = shouldSwap ? 1 : 0;
+      
       simStats.total++;
       if (g.winner === null) {
         simStats.draws++;
-      } else if (g.winner === 0) {
-        simStats.aWins++;
+      } else if (g.winner === botAActualId) {
+        simStats.aWins++;  // original botA won
       } else {
-        simStats.bWins++;
+        simStats.bWins++;  // original botB won
       }
 
       // update display every 10 matches

@@ -121,9 +121,10 @@ export class Game {
       .map(t => ({ rel: sub(t.pos, me.pos) }));
 
     // Convert many fields into car-local coordinates (x=forward, y=right)
-    const ca = Math.cos(-me.ang), sa = Math.sin(-me.ang);
+    // Local: x = forward (me.ang direction), y = right
+    const ca = Math.cos(me.ang), sa = Math.sin(me.ang);
     function toLocal(v) {
-      return { x: v.x * ca - v.y * sa, y: v.x * sa + v.y * ca };
+      return { x: v.x * ca + v.y * sa, y: -v.x * sa + v.y * ca };
     }
 
     const enemyLocal = toLocal(relEnemyWorld);
@@ -249,7 +250,7 @@ export class Game {
     // shooting
     if (action.shoot && car.shootCd <= 0) {
       car.shootCd = 0.25;
-      const dir = rot(action.aimAngle);
+      const dir = rot(car.ang + action.aimAngle);
       const muzzle = add(car.pos, mul(dir, car.radius + 6));
       this.bullets.push({
         pos: muzzle,

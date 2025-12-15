@@ -1,232 +1,279 @@
-// Deterministic “win” controller: finish-first + hard avoidance + opportunistic kill.
-// Assumes rel vectors (finishRel / enemy.relPos / sense.*.rel) are in car-local coords (as in your working example).
-
-const State = {
+const S = {
   prevT: null,
-  prevEnemyRel: null
+  prevEnemyRel: null,
+  stuckT: 0,
+  lastPos: null,
 };
 
-function clamp(v, a, b) {
-  return v < a ? a : (v > b ? b : v);
+const TAU = Math.PI * 2;
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function hypot2(x, y) { return Math.hypot(x, y); }
+function wrapPI(a) {
+  while (a > Math.PI) a -= TAU;
+  while (a < -Math.PI) a += TAU;
+  return a;
 }
 
-function hypot2(x, y) {
-  return Math.hypot(x, y);
+function worldToLocal(ang, v) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return { x: c * v.x + s * v.y, y: -s * v.x + c * v.y };
 }
 
-function sign(x) {
-  return x < 0 ? -1 : (x > 0 ? 1 : 0);
-}
-
-function nearestFrontRay(vision) {
+function nearestRay(vision, angle) {
   let best = null;
   for (const r of vision) {
-    const a = Math.abs(r.angle);
-    if (!best || a < best.a) best = { a, r };
+    const da = Math.abs(r.angle - angle);
+    if (!best || da < best.da) best = { da, r };
   }
   return best ? best.r : null;
 }
 
-function losNotBlocked(vision, targetAngle, targetDist) {
-  // Find closest ray to targetAngle. If it hits a wall closer than target, assume blocked.
-  let best = null;
-  for (const r of vision) {
-    const da = Math.abs(r.angle - targetAngle);
-    if (!best || da < best.da) best = { da, r };
-  }
-  if (!best) return true;
-  const r = best.r;
-  if (r.hit === "wall" && r.dist < targetDist - 10) return false;
+function frontRay(vision) {
+  return nearestRay(vision, 0);
+}
+
+function losOK(vision, ang, dist) {
+  const r = nearestRay(vision, ang);
+  if (!r) return true;
+  if (r.hit === "wall" && r.dist < dist * 0.92) return false;
   return true;
 }
 
+function solveIntercept(relPos, relVel, bulletSpeed, maxT = 1.2) {
+  const px = relPos.x, py = relPos.y;
+  const vx = relVel.x, vy = relVel.y;
+  const a = (vx * vx + vy * vy) - bulletSpeed * bulletSpeed;
+  const b = 2 * (px * vx + py * vy);
+  const c = (px * px + py * py);
+
+  let t = null;
+  if (Math.abs(a) < 1e-6) {
+    if (Math.abs(b) > 1e-6) {
+      const tt = -c / b;
+      if (tt > 0) t = tt;
+    }
+  } else {
+    const d = b * b - 4 * a * c;
+    if (d >= 0) {
+      const sd = Math.sqrt(d);
+      const t1 = (-b - sd) / (2 * a);
+      const t2 = (-b + sd) / (2 * a);
+      t = t1 > 0 ? t1 : (t2 > 0 ? t2 : null);
+    }
+  }
+  if (!t || t <= 0) return null;
+  if (t > maxT) t = maxT;
+  return {
+    t,
+    aimLocal: { x: px + vx * t, y: py + vy * t }
+  };
+}
+
+function bestEscapeRay(vision) {
+  // выбираем луч с максимальной дистанцией (предпочитаем не "wall")
+  let best = null;
+  for (const r of vision) {
+    let score = r.dist;
+    if (r.hit === null) score += 120;        // открытое направление очень ценно
+    if (Math.abs(r.angle) < 0.35) score += 30; // чуть предпочитаем более "вперёд", чтобы не крутиться на месте
+    if (!best || score > best.score) best = { score, r };
+  }
+  return best ? best.r : null;
+}
+
 export function decide(input) {
-  const { t, me, enemy, vision, finishRel, sense } = input;
+  const { t, me, enemy, vision, finishRel, sense, rules } = input;
 
-  // Convert world-relative vectors into car-local coordinates (x = forward, y = right)
-  const ca = Math.cos(-me.ang), sa = Math.sin(-me.ang);
-  const finishLocal = {
-    x: finishRel.x * ca - finishRel.y * sa,
-    y: finishRel.x * sa + finishRel.y * ca,
-  };
-  const enemyLocal = {
-    x: enemy.relPos.x * ca - enemy.relPos.y * sa,
-    y: enemy.relPos.x * sa + enemy.relPos.y * ca,
-  };
+  const MAX_SPD = rules?.maxSpeed ?? 360;
 
-  // transform sensed bullets/turrets into local frame (keep other fields)
-  const localBullets = (sense?.bullets || []).map(b => ({
-    ...b,
-    rel: {
-      x: b.rel.x * ca - b.rel.y * sa,
-      y: b.rel.x * sa + b.rel.y * ca,
-    }
-  }));
-  const localTurrets = (sense?.turrets || []).map(tu => ({
-    ...tu,
-    rel: {
-      x: tu.rel.x * ca - tu.rel.y * sa,
-      y: tu.rel.x * sa + tu.rel.y * ca,
-    }
-  }));
-
-  // ---- Tunables ----
-  const SAFE_WALL = 55;
-  const HARD_WALL = 28;
-
+  const SAFE_WALL = 70;
+  const HARD_WALL = 32;
   const SAFE_TURRET = 150;
 
-  const BULLET_WARN = 110;
-  const BULLET_CRIT = 70;
+  const BULLET_WARN = 150;
+  const BULLET_CRIT = 75;
 
-  const SHOOT_DIST = 320;
-  const SHOOT_FOV = 0.22;     // radians in local frame (angle from forward)
-  const BULLET_SPEED = 800;   // only for lead; driving does not depend on it
+  const SHOOT_DIST = 380;
+  const SHOOT_FOV = 0.33;
+  const BULLET_SPEED = 520;
 
-  const FINISH_FORCE_DIST = 380; // if finish is close => ignore fights
-  const KILL_HP = 30;
+  const FORCE_FINISH_DIST = 330;
+  const ENGAGE_DIST = 340;
+  const KILL_HP = 44;
+  const ADV_HP = 16;
 
-  // ---- Distances ----
-  const finishDist = hypot2(finishRel.x, finishRel.y);
-  // use local coordinates for enemy targeting/motion
-  const enemyRel = enemyLocal;
-  const enemyDist = hypot2(enemy.relPos.x, enemy.relPos.y);
-
-  // ---- Tick dt and enemy rel-velocity (safe because you guaranteed stable ticks) ----
+  // dt
   let dt = 0;
-  if (State.prevT != null) dt = Math.max(1e-6, t - State.prevT);
-  State.prevT = t;
+  if (S.prevT != null) dt = Math.max(1e-6, t - S.prevT);
+  S.prevT = t;
 
+  // enemy rel vel (local)
   let enemyRelVel = { x: 0, y: 0 };
-  if (State.prevEnemyRel && dt > 0) {
+  if (S.prevEnemyRel && dt > 0) {
     enemyRelVel = {
-      x: (enemyRel.x - State.prevEnemyRel.x) / dt,
-      y: (enemyRel.y - State.prevEnemyRel.y) / dt
+      x: (enemy.relPos.x - S.prevEnemyRel.x) / dt,
+      y: (enemy.relPos.y - S.prevEnemyRel.y) / dt,
     };
   }
-  State.prevEnemyRel = { x: enemyRel.x, y: enemyRel.y };
+  S.prevEnemyRel = { ...enemy.relPos };
 
-  // ---- Decide target (finish-first, kill only when выгодно) ----
-  const enemyAhead = enemyRel.x > -10; // “примерно впереди”
-  const shouldForceFinish = (finishDist < FINISH_FORCE_DIST) || enemy.hp === 0 || me.hp < 18;
+  // stuck detection
+  if (S.lastPos) {
+    const moved = hypot2(me.pos.x - S.lastPos.x, me.pos.y - S.lastPos.y);
+    if (moved < 2.2) S.stuckT += dt;
+    else S.stuckT = Math.max(0, S.stuckT - dt * 0.7);
+  }
+  S.lastPos = { ...me.pos };
 
-  const shouldEngage =
-    !shouldForceFinish &&
+  const vLocal = worldToLocal(me.ang, me.vel);
+  const speedAbs = hypot2(me.vel.x, me.vel.y);
+  const stuck = (S.stuckT > 0.7) && (speedAbs < 12);
+
+  const bullets = sense?.bullets || [];
+  const turrets = sense?.turrets || [];
+
+  let turretRisk = 0;
+  for (const tr of turrets) {
+    const d = hypot2(tr.rel.x, tr.rel.y);
+    if (d < SAFE_TURRET && tr.rel.x > -40)
+      turretRisk = Math.max(turretRisk, (SAFE_TURRET - d) / SAFE_TURRET);
+  }
+
+  // fight vs finish
+  const enemyRel = enemy.relPos;
+  const enemyDist = hypot2(enemyRel.x, enemyRel.y);
+  const finishDist = hypot2(finishRel.x, finishRel.y);
+
+  const enemyAhead = enemyRel.x > -35;
+  const forceFinish =
+    enemy.hp === 0 ||
+    finishDist < FORCE_FINISH_DIST ||
+    me.hp < 18 ||
+    turretRisk > 0.65;
+
+  const wantEngage =
+    !forceFinish &&
     enemyAhead &&
-    enemyDist < 280 &&
-    (enemy.hp <= KILL_HP || me.hp > enemy.hp + 25);
+    enemyDist < ENGAGE_DIST &&
+    (enemy.hp <= KILL_HP ||
+      me.hp >= enemy.hp + ADV_HP ||
+      (me.hp > 55 && enemy.hp < 70));
 
-  const target = shouldEngage ? enemyRel : finishRel;
-  const targetAngle = Math.atan2(target.y, target.x);
+  const target = wantEngage ? enemyRel : finishRel;
+  const angToTarget = Math.atan2(target.y, target.x);
 
-  // ---- Base steering toward target (local angle -> steer) ----
-  let steer = clamp(targetAngle * 2.0, -1, 1);
-  let throttle = 1;
+  // behind-turn mode (не едем быстро, если цель сзади)
+  const targetBehind = target.x < -60 && Math.abs(angToTarget) > 1.0;
 
-  // ---- Wall avoidance via LIDAR (repulsion in angle space) ----
+  // base steer
+  let steer = clamp(angToTarget * 2.4, -1, 1);
+
+  // wall / bullet / turret steering modifiers (упрощённо, как в А)
   let wallAvoid = 0;
+  let frontRisk = 0;
   for (const r of vision) {
     if (r.hit !== "wall") continue;
     if (r.dist >= SAFE_WALL) continue;
-
-    const k = (SAFE_WALL - r.dist) / SAFE_WALL; // 0..1
-    // Push away from the side where wall is detected.
-    // Stronger near center.
-    const centerBoost = 1 + (1 - Math.min(1, Math.abs(r.angle) / 0.8));
-    wallAvoid += -sign(r.angle) * k * (0.7 + 0.8 * centerBoost);
+    const k = (SAFE_WALL - r.dist) / SAFE_WALL;
+    const a = r.angle;
+    const absA = Math.abs(a);
+    const frontW = absA < 0.35 ? 2.6 : (absA < 0.8 ? 1.2 : 0.55);
+    const sideSign = a > 0 ? 1 : -1;
+    wallAvoid += -sideSign * k * frontW;
+    if (absA < 0.25) frontRisk = Math.max(frontRisk, k);
   }
 
-  // ---- Turret avoidance (treat as obstacles) ----
   let turretAvoid = 0;
-  const turrets = localTurrets || [];
-  for (const tr of turrets) {
-    const dx = tr.rel.x, dy = tr.rel.y;
-    const d = hypot2(dx, dy);
-    if (d >= SAFE_TURRET) continue;
-    if (dx < -25) continue; // mostly behind: ignore
-
-    const a = Math.atan2(dy, dx);
-    const k = (SAFE_TURRET - d) / SAFE_TURRET;
-    const frontBoost = Math.abs(a) < 0.5 ? 1.4 : 1.0;
-    turretAvoid += -sign(a) * k * frontBoost;
-  }
-
-  // ---- Bullet dodge (simple, robust: based on rel position) ----
-  let dodge = 0;
-  let bulletDanger = 0;
-  const bullets = localBullets || [];
-  for (const b of bullets) {
-    const dx = b.rel.x, dy = b.rel.y;
-    const d = hypot2(dx, dy);
-    if (d >= BULLET_WARN) continue;
-    if (dx < -60) continue; // mostly behind
-
-    const a = Math.atan2(dy, dx);
-    const k = (BULLET_WARN - d) / BULLET_WARN;
-    const dmg = (b.dmg || 10);
-    const w = k * (0.6 + 0.02 * dmg);
-
-    bulletDanger += w;
-    dodge += -sign(a) * w;
-  }
-
-  // ---- Combine steering influences ----
-  steer = clamp(
-    steer +
-      wallAvoid * 1.25 +
-      turretAvoid * 1.6 +
-      dodge * 2.1,
-    -1, 1
-  );
-
-  // ---- Throttle control (front collisions + tight turns) ----
-  const front = nearestFrontRay(vision);
-
-  if (front && front.hit === "wall") {
-    if (front.dist < HARD_WALL) throttle = -1;
-    else if (front.dist < SAFE_WALL) throttle = 0.25;
-  }
-
-  // Slow a bit on extreme steering to avoid scraping walls
-  if (Math.abs(steer) > 0.85 && throttle > 0.6) throttle = 0.75;
-
-  // Under bullet pressure, prefer speed (unless we must brake for wall)
-  if (bulletDanger > 0.9 && throttle > 0) throttle = 1;
-
-  // If turret very close ahead, keep moving (don’t stall)
-  // (stalls = death by turret)
   for (const tr of turrets) {
     const d = hypot2(tr.rel.x, tr.rel.y);
-    if (d < 80 && tr.rel.x > -10 && throttle > 0) throttle = Math.max(throttle, 0.8);
+    if (d >= SAFE_TURRET || tr.rel.x < -50) continue;
+    const a = Math.atan2(tr.rel.y, tr.rel.x);
+    const k = (SAFE_TURRET - d) / SAFE_TURRET;
+    turretAvoid += -Math.sign(a || 1) * k * 1.8;
   }
 
-  // ---- Shooting (opportunistic, with lead; does not affect driving) ----
+  let bulletAvoid = 0;
+  let panic = 0;
+  for (const b of bullets) {
+    const d = hypot2(b.rel.x, b.rel.y);
+    if (d >= BULLET_WARN || b.rel.x < -80) continue;
+    const v = b.vel;
+    const vLen = hypot2(v.x, v.y);
+    if (vLen < 1e-3) continue;
+    const nx = v.x / vLen, ny = v.y / vLen;
+    const cross = b.rel.x * ny - b.rel.y * nx;
+    const dodgeDir = cross >= 0 ? 1 : -1;
+    const k = (BULLET_WARN - d) / BULLET_WARN;
+    panic = Math.max(panic, k);
+    const comingFront = (b.rel.x > 0) ? 1.15 : 0.85;
+    bulletAvoid += dodgeDir * k * 2.2 * comingFront;
+  }
+
+  steer = clamp(steer + wallAvoid * 1.15 + turretAvoid * 1.35 + bulletAvoid * 1.0, -1, 1);
+
+  // speed controller
+  const vF = vLocal.x;
+  const vLat = vLocal.y;
+
+  const turnPenalty = 1 - clamp(Math.abs(steer), 0, 1) * 0.55;
+  let desiredSpeed = MAX_SPD * turnPenalty;
+
+  if (frontRisk > 0) desiredSpeed *= (1 - 0.85 * frontRisk);
+  if (panic > 0.25) desiredSpeed = Math.max(desiredSpeed, MAX_SPD * 0.92);
+  if (turretRisk > 0.35) desiredSpeed = Math.max(desiredSpeed, MAX_SPD * 0.85);
+  if (wantEngage && enemyDist < 220) desiredSpeed = Math.max(desiredSpeed, MAX_SPD * 0.88);
+
+  if (targetBehind) desiredSpeed = 80;
+
+  let throttle = clamp((desiredSpeed - vF) / 240, -1, 1);
+  if (Math.abs(vLat) > 120 && throttle > 0.4) throttle *= 0.75;
+
+  const fr = frontRay(vision);
+  const hardFront = fr && fr.hit === "wall" && fr.dist < HARD_WALL;
+
+  if (hardFront) throttle = -1;
+
+  // === НОВОЕ: нормальный stuck-escape вместо "throttle=0" ===
+  if (stuck) {
+    const best = bestEscapeRay(vision);
+    const front = fr;
+    const frontDist = front ? front.dist : 999;
+
+    // если спереди тесно — сдаём назад и выворачиваем к более свободной стороне
+    if (front && front.hit === "wall" && frontDist < 85) {
+      throttle = -1;
+      // steer в сторону луча с лучшей дистанцией (как правило это "дырка")
+      const a = best ? best.angle : (front.angle >= 0 ? -1 : 1);
+      steer = clamp(a * 1.6, -1, 1);
+    } else {
+      // иначе пытаемся выйти вперёд в наиболее свободное направление
+      const a = best ? best.angle : 0;
+      steer = clamp(a * 1.6, -1, 1);
+      throttle = 1;
+    }
+  }
+
+  // Shooting
   let shoot = false;
-  let aimAngle = 0;
+  let aimAngle = me.ang;
 
-  if (me.shootCd <= 0 && enemy.hp > 0) {
-    const baseAngToEnemy = Math.atan2(enemyRel.y, enemyRel.x);
-
-    if (enemyDist < SHOOT_DIST && Math.abs(baseAngToEnemy) < 0.9) {
-      // Lead in local frame using rel-velocity (stable ticks assumed)
-      const leadT = clamp(enemyDist / BULLET_SPEED, 0, 0.45);
-      const px = enemyRel.x + enemyRelVel.x * leadT;
-      const py = enemyRel.y + enemyRelVel.y * leadT;
-
-      const a = Math.atan2(py, px);
-
-      // Only fire if roughly in front and not obviously blocked by a wall ray
-      if (Math.abs(a) < SHOOT_FOV && losNotBlocked(vision, a, enemyDist)) {
-        // Don’t shoot in “critical bullet” moments: survive first
-        let crit = false;
-        for (const b of bullets) {
-          const d = hypot2(b.rel.x, b.rel.y);
-          if (d < BULLET_CRIT && b.rel.x > -40) { crit = true; break; }
-        }
-        if (!crit) {
-          shoot = true;
-          aimAngle = a;
-        }
+  if (me.shootCd <= 0 && enemy.hp > 0 && enemyDist < SHOOT_DIST && enemyRel.x > -20) {
+    const relVel = enemyRelVel;
+    const sol = solveIntercept(enemyRel, relVel, BULLET_SPEED, 1.15);
+    if (sol) {
+      const a = Math.atan2(sol.aimLocal.y, sol.aimLocal.x);
+      const closeBullet = bullets.some(b => hypot2(b.rel.x, b.rel.y) < BULLET_CRIT && b.rel.x > -25);
+      const blocked = !losOK(vision, a, enemyDist);
+      if (!closeBullet && Math.abs(a) < SHOOT_FOV && (!blocked || enemyDist < 110)) {
+        shoot = true;
+        aimAngle = wrapPI(me.ang + a);
+      }
+    } else {
+      const a = Math.atan2(enemyRel.y, enemyRel.x);
+      if (Math.abs(a) < SHOOT_FOV && losOK(vision, a, enemyDist)) {
+        shoot = true;
+        aimAngle = wrapPI(me.ang + a);
       }
     }
   }
@@ -235,6 +282,6 @@ export function decide(input) {
     throttle: clamp(throttle, -1, 1),
     steer: clamp(steer, -1, 1),
     shoot,
-    aimAngle: shoot ? aimAngle : 0
+    aimAngle,
   };
 }

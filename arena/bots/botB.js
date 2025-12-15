@@ -157,7 +157,7 @@ export function decide(input) {
 
   // Shooting — агрессивнее и точнее
   let shoot = false;
-  let aimAngle = me.ang;
+  let aimAngle = 0;
 
   if (me.shootCd <= 0 && enemy.hp > 0 && enemyDist < SHOOT_DIST) {
     const baseAng = Math.atan2(enemyRel.y, enemyRel.x);
@@ -180,7 +180,7 @@ export function decide(input) {
 
         if (!tooCloseBullet && (!blocked || enemyDist < 120)) {  // стреляем даже через стену, если очень близко
           shoot = true;
-          aimAngle = me.ang + a;  // важно: aimAngle — абсолютный!
+          aimAngle = a;  // относительный локальный угол
         }
       }
     }
