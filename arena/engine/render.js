@@ -18,6 +18,11 @@ export class Renderer {
     };
     this.isDragging = false;
     this.dragStart = { x: 0, y: 0 };
+    // auto follow settings
+    this.autoFollow = true;
+    this.minZoom = 0.5;
+    this.maxZoom = 10;
+    this._smooth = 0.12; // camera smoothing factor (0..1)
   }
 
   // Convert canvas coordinates to world coordinates
@@ -39,19 +44,72 @@ export class Renderer {
     const { width:w, height:h } = this.c;
     ctx.clearRect(0,0,w,h);
 
+    // Auto-follow all cars: compute bounding box and target camera
+    if (this.autoFollow && game && game.cars && !this.isDragging) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const car of game.cars) {
+        if (!car) continue;
+        minX = Math.min(minX, car.pos.x);
+        minY = Math.min(minY, car.pos.y);
+        maxX = Math.max(maxX, car.pos.x);
+        maxY = Math.max(maxY, car.pos.y);
+      }
+      if (minX === Infinity) { minX = 0; minY = 0; maxX = w; maxY = h; }
+
+      // padding in world units
+      const PAD = 160;
+      const bboxW = Math.max(1, maxX - minX);
+      const bboxH = Math.max(1, maxY - minY);
+
+      // compute required zoom to fit bbox + padding into canvas
+      const targetZoomX = w / (bboxW + PAD * 2);
+      const targetZoomY = h / (bboxH + PAD * 2);
+      let targetZoom = Math.min(targetZoomX, targetZoomY);
+      targetZoom = Math.max(this.minZoom, Math.min(this.maxZoom, targetZoom));
+
+      // target camera top-left so that center of bbox lands at canvas center
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const targetCamX = centerX - (w / (2 * targetZoom));
+      const targetCamY = centerY - (h / (2 * targetZoom));
+
+      // smooth step towards target
+      this.camera.x += (targetCamX - this.camera.x) * this._smooth;
+      this.camera.y += (targetCamY - this.camera.y) * this._smooth;
+      this.camera.zoom += (targetZoom - this.camera.zoom) * this._smooth;
+    }
+
     // Apply camera transform
     ctx.save();
     ctx.translate(w / 2, h / 2); // center of canvas
     ctx.scale(this.camera.zoom, this.camera.zoom);
     ctx.translate(-this.camera.x - w / (2 * this.camera.zoom), -this.camera.y - h / (2 * this.camera.zoom));
 
-    // background grid
+    // background grid (drawn in world coordinates across visible area)
     ctx.globalAlpha = 0.12;
-    ctx.beginPath();
-    for (let x=0; x<=this.c.width; x+=40) { ctx.moveTo(x,0); ctx.lineTo(x,this.c.height); }
-    for (let y=0; y<=this.c.height; y+=40) { ctx.moveTo(0,y); ctx.lineTo(this.c.width,y); }
     ctx.strokeStyle = "#9fb4cc";
     ctx.lineWidth = 1;
+
+    // visible world bounds
+    const worldLeft = this.camera.x;
+    const worldTop = this.camera.y;
+    const worldRight = this.camera.x + (w / this.camera.zoom);
+    const worldBottom = this.camera.y + (h / this.camera.zoom);
+
+    const gridSize = 40;
+    ctx.beginPath();
+    // vertical lines
+    let sx = Math.floor(worldLeft / gridSize) * gridSize;
+    for (let x = sx; x <= worldRight; x += gridSize) {
+      ctx.moveTo(x, worldTop);
+      ctx.lineTo(x, worldBottom);
+    }
+    // horizontal lines
+    let sy = Math.floor(worldTop / gridSize) * gridSize;
+    for (let y = sy; y <= worldBottom; y += gridSize) {
+      ctx.moveTo(worldLeft, y);
+      ctx.lineTo(worldRight, y);
+    }
     ctx.stroke();
     ctx.globalAlpha = 1;
 
