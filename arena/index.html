@@ -20,6 +20,7 @@
         <select id="botA">
           <option value="./bots/botA.js">botA.js</option>
           <option value="./bots/botB.js">botB.js</option>
+          <option value="./bots/botML.js">botML.js</option>
         </select>
       </label>
 
@@ -27,7 +28,12 @@
         <select id="botB">
           <option value="./bots/botB.js">botB.js</option>
           <option value="./bots/botA.js">botA.js</option>
+          <option value="./bots/botML.js">botML.js</option>
         </select>
+      </label>
+      
+      <label style="margin-left:8px;">
+        <input type="checkbox" id="randomizeSides" checked /> Менять стороны A/B
       </label>
       
       <label style="margin-left:12px;">Debug:
@@ -68,6 +74,14 @@
        <div class="panel">
          <div class="h">Status</div>
          <pre id="status"></pre>
+       </div>
+
+       <div class="panel">
+         <div class="h">Bot 3: Machine Learning</div>
+         <div class="p">Экспериментальный бот с обучением. Прогресс сохраняется автоматически в браузере.</div>
+         <button id="btnBot3Train">Начать обучение</button>
+         <button id="btnBot3Reset" style="margin-left:6px;">Сбросить прогресс</button>
+         <pre id="bot3Status" style="margin-top:8px;"></pre>
        </div>
      </div>
    </div>  <script type="module" src="./main.js"></script>
