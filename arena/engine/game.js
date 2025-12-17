@@ -1,14 +1,31 @@
 import { makeWorld } from "./world.js";
 import { add, sub, mul, len, norm, clamp, rot, circleRectResolve, reflect, lcg, v, rayCircle, rayRect } from "./math.js";
 
+const CAR_PHYSICS = {
+  TURN_RATE: 3.2,
+  TURN_MIN_FACTOR: 0.28,
+  TURN_REFERENCE_SPEED: 320,
+  ACCEL_FWD: 520,
+  ACCEL_REV: 360,
+  BRAKE_FORCE: 900,
+  MAX_SPEED_FWD: 360,
+  MAX_SPEED_REV: 220,
+  MAX_SPEED: 360,
+  DRAG_LONGITUDINAL: 1.6,   // per-second decay of forward velocity
+  DRAG_LATERAL: 10.5,       // lateral velocity bleeds much faster to avoid drifting
+  DRAG_AERO: 0.85,          // scales with absolute speed (per second)
+  IDLE_BRAKE: 140,          // additional braking when throttle released
+};
+
 export class Game {
-  constructor({ seed=1337, bots, botNames=["A","B"] }) {
+  constructor({ seed=1337, bots, botNames=["A","B"], worldOptions=null }) {
     this.rng = lcg(seed);
     this.seed = seed;
     this.botMods = bots;
     this.botNames = botNames;
 
-    this.world = makeWorld();
+    const worldOpts = { seed, ...(worldOptions || {}) };
+    this.world = makeWorld(worldOpts);
     this.world.finishCenter = () => ({ x: this.world.finish.x + this.world.finish.w/2, y: this.world.finish.y + this.world.finish.h/2 });
  
     this.time = 0;
@@ -229,23 +246,61 @@ export class Game {
   }
 
   applyAction(car, action, dt) {
-    const TURN_RATE = 3.2;         // rad/s
-    const ACCEL = 520;             // units/s^2
-    const BRAKE = 620;
-    const MAX_SPEED = 360;
+    const cfg = CAR_PHYSICS;
+    const throttle = clamp(action.throttle ?? 0, -1, 1);
+    const steer = clamp(action.steer ?? 0, -1, 1);
 
-    car.ang += action.steer * TURN_RATE * dt;
+    const speed = len(car.vel);
+    const steerFactor = clamp(1 - (speed / cfg.TURN_REFERENCE_SPEED), cfg.TURN_MIN_FACTOR, 1);
+    car.ang += steer * cfg.TURN_RATE * steerFactor * dt;
 
     const fwd = rot(car.ang);
-    const speed = len(car.vel);
+    const right = { x: -fwd.y, y: fwd.x };
+    let forwardSpeed = car.vel.x * fwd.x + car.vel.y * fwd.y;
+    let sideSpeed = car.vel.x * right.x + car.vel.y * right.y;
 
-    // throttle < 0 = тормоз/реверс (упрощенно)
-    let accel = action.throttle >= 0 ? ACCEL * action.throttle : BRAKE * action.throttle;
-    car.vel = add(car.vel, mul(fwd, accel * dt));
+    if (throttle > 0.02) {
+      if (forwardSpeed < -5) {
+        // braking from reverse before accelerating forward
+        const brake = cfg.BRAKE_FORCE * throttle * dt;
+        forwardSpeed = Math.min(0, forwardSpeed + brake);
+      } else {
+        forwardSpeed += cfg.ACCEL_FWD * throttle * dt;
+      }
+    } else if (throttle < -0.02) {
+      if (forwardSpeed > 5) {
+        // braking while moving forward
+        const brake = cfg.BRAKE_FORCE * -throttle * dt;
+        forwardSpeed = Math.max(0, forwardSpeed - brake);
+      } else {
+        forwardSpeed += cfg.ACCEL_REV * throttle * dt;
+      }
+    } else if (Math.abs(forwardSpeed) > 0.01) {
+      // natural slow-down when throttle is released
+      const idle = Math.min(Math.abs(forwardSpeed), cfg.IDLE_BRAKE * dt);
+      forwardSpeed -= Math.sign(forwardSpeed) * idle;
+    }
 
-    // clamp speed
+    // aerodynamic and tire drag
+    const longDecay = Math.exp(-cfg.DRAG_LONGITUDINAL * dt);
+    const latDecay = Math.exp(-cfg.DRAG_LATERAL * dt);
+    forwardSpeed *= longDecay;
+    sideSpeed *= latDecay;
+
+    const aeroStrength = Math.exp(-cfg.DRAG_AERO * (speed / cfg.MAX_SPEED) * dt);
+    forwardSpeed *= aeroStrength;
+    sideSpeed *= aeroStrength;
+
+    // clamp components
+    forwardSpeed = clamp(forwardSpeed, -cfg.MAX_SPEED_REV, cfg.MAX_SPEED_FWD);
+    const maxSide = cfg.MAX_SPEED * 0.65;
+    sideSpeed = clamp(sideSpeed, -maxSide, maxSide);
+
+    car.vel = add(mul(fwd, forwardSpeed), mul(right, sideSpeed));
+
+    // clamp overall speed for safety
     const ns = len(car.vel);
-    if (ns > MAX_SPEED) car.vel = mul(norm(car.vel), MAX_SPEED);
+    if (ns > cfg.MAX_SPEED) car.vel = mul(norm(car.vel), cfg.MAX_SPEED);
 
     // shooting
     if (action.shoot && car.shootCd <= 0) {
@@ -266,8 +321,9 @@ export class Game {
   integrateCar(car, dt) {
     if (car.hp <= 0) return;
 
-    // friction
-    car.vel = mul(car.vel, Math.pow(0.12, dt)); // экспоненциальное затухание
+    // residual ground drag so cars eventually stop if inputs zero
+    const groundDrag = Math.exp(-0.45 * dt);
+    car.vel = mul(car.vel, groundDrag);
 
     // move
     car.pos = add(car.pos, mul(car.vel, dt));

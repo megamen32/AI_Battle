@@ -26,6 +26,11 @@ const seedEl = document.getElementById("seed");
 const botAEl = document.getElementById("botA");
 const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
+const proceduralMapsEl = document.getElementById("proceduralMaps");
+const bot3StepsEl = document.getElementById("bot3Steps");
+const bot3LrEl = document.getElementById("bot3Lr");
+const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
+const bot3EntropyEl = document.getElementById("bot3Entropy");
 
 let paused = false;
 
@@ -44,6 +49,7 @@ async function loadBot(path, slot = "") {
 
 async function boot() {
   const getRandomizeSides = () => randomizeSidesEl?.checked ?? true;
+  const getProceduralMaps = () => proceduralMapsEl?.checked ?? false;
 
   async function loadSelectedBots() {
     const paths = [botAEl.value, botBEl.value];
@@ -83,9 +89,10 @@ async function boot() {
     const ordered = orderBots(newSeed, selectedBots);
     const [bot0, bot1] = ordered.bots;
     const [name0, name1] = ordered.names;
+    const worldOptions = { procedural: getProceduralMaps() };
 
     // recreate game and renderer
-    game = new Game({ seed: newSeed, bots: [bot0, bot1], botNames: [name0, name1] });
+    game = new Game({ seed: newSeed, bots: [bot0, bot1], botNames: [name0, name1], worldOptions });
     renderer = new Renderer(canvas);
 
     // initialize renderer debug flags from UI
@@ -219,6 +226,7 @@ async function boot() {
   const btnBot3Train = document.getElementById('btnBot3Train');
   const btnBot3Reset = document.getElementById('btnBot3Reset');
   const bot3StatusEl = document.getElementById('bot3Status');
+  const bot3ChartEl = document.getElementById('bot3Chart');
 
   loadBot3Brain();
 
@@ -228,6 +236,64 @@ async function boot() {
     return `Последнее сохранение: ${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
   }
 
+  const bot3RewardHistory = [];
+  const BOT3_CHART_HISTORY = 120;
+
+  function renderBot3Chart() {
+    if (!bot3ChartEl) return;
+    const ctx = bot3ChartEl.getContext('2d');
+    if (!ctx) return;
+    const w = bot3ChartEl.width;
+    const h = bot3ChartEl.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(10,14,20,0.9)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2);
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+
+    if (!bot3RewardHistory.length) {
+      ctx.fillStyle = "#7f8b99";
+      ctx.font = "12px sans-serif";
+      ctx.fillText("Нет данных", 10, h / 2);
+      return;
+    }
+
+    const min = Math.min(...bot3RewardHistory);
+    const max = Math.max(...bot3RewardHistory);
+    const range = Math.max(1e-3, max - min);
+    ctx.strokeStyle = "#8bd5ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    bot3RewardHistory.forEach((val, idx) => {
+      const x = (idx / (bot3RewardHistory.length - 1 || 1)) * (w - 10) + 5;
+      const norm = (val - min) / range;
+      const y = h - norm * (h - 10) - 5;
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.setLineDash([4, 2]);
+    ctx.beginPath();
+    const zeroY = h - ((0 - min) / range) * (h - 10) - 5;
+    if (zeroY >= 0 && zeroY <= h) {
+      ctx.moveTo(0, zeroY);
+      ctx.lineTo(w, zeroY);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function pushBot3Reward(value) {
+    bot3RewardHistory.push(value);
+    if (bot3RewardHistory.length > BOT3_CHART_HISTORY) bot3RewardHistory.shift();
+    renderBot3Chart();
+  }
+
   function updateBot3Status(text) {
     if (!bot3StatusEl) return;
     const savedText = formatTimestamp(getBot3LastSaved());
@@ -235,10 +301,13 @@ async function boot() {
   }
 
   updateBot3Status("Мозг загружен и готов к обучению (PPO + self-play).");
+  renderBot3Chart();
 
   if (btnBot3Reset) {
     btnBot3Reset.onclick = () => {
       resetBot3Brain();
+      bot3RewardHistory.length = 0;
+      renderBot3Chart();
       updateBot3Status("Прогресс сброшен. Модель возвращена к значениям по умолчанию.");
     };
   }
@@ -262,12 +331,58 @@ async function boot() {
       damage: 0.04,
       damageTaken: 0.03,
       speed: 0.002,
+      forwardBonus: 0.000,
+      backwardPenalty: 0.00,
       finishBonus: 1.5,
       killBonus: 1.2,
       winBonus: 2.0,
       drawBonus: 0.3,
+      timePenalty: 0.001,
+      loiterPenalty: 0.08,
+      loiterRadius: 260,
     },
   };
+
+  if (bot3StepsEl) bot3StepsEl.value = BOT3_PPO_CONFIG.stepsPerBatch;
+  if (bot3LrEl) bot3LrEl.value = BOT3_PPO_CONFIG.lr;
+  if (bot3MaxTimeEl) bot3MaxTimeEl.value = Math.round(BOT3_PPO_CONFIG.maxMatchSteps / 60);
+  if (bot3EntropyEl) bot3EntropyEl.value = BOT3_PPO_CONFIG.entropyCoef;
+
+  function createTrainerConfig(overrides = {}) {
+    const cfg = {
+      ...BOT3_PPO_CONFIG,
+      rewards: { ...BOT3_PPO_CONFIG.rewards },
+    };
+    if (typeof overrides.stepsPerBatch === "number") cfg.stepsPerBatch = overrides.stepsPerBatch;
+    if (typeof overrides.lr === "number") cfg.lr = overrides.lr;
+    if (typeof overrides.maxMatchSteps === "number") cfg.maxMatchSteps = overrides.maxMatchSteps;
+    if (typeof overrides.entropyCoef === "number") cfg.entropyCoef = overrides.entropyCoef;
+    if (typeof overrides.miniBatch === "number") cfg.miniBatch = overrides.miniBatch;
+    if (typeof overrides.epochs === "number") cfg.epochs = overrides.epochs;
+    return cfg;
+  }
+
+  function readTrainingOverrides() {
+    const overrides = {};
+    const clampNum = (val, min, max) => Math.min(max, Math.max(min, val));
+    if (bot3StepsEl) {
+      const v = parseInt(bot3StepsEl.value, 10);
+      if (!Number.isNaN(v)) overrides.stepsPerBatch = clampNum(v, 256, 8192);
+    }
+    if (bot3LrEl) {
+      const v = parseFloat(bot3LrEl.value);
+      if (!Number.isNaN(v)) overrides.lr = clampNum(v, 1e-5, 0.01);
+    }
+    if (bot3MaxTimeEl) {
+      const v = parseFloat(bot3MaxTimeEl.value);
+      if (!Number.isNaN(v)) overrides.maxMatchSteps = clampNum(Math.round(v * 60), 10 * 60, 180 * 60);
+    }
+    if (bot3EntropyEl) {
+      const v = parseFloat(bot3EntropyEl.value);
+      if (!Number.isNaN(v)) overrides.entropyCoef = clampNum(v, 0.0001, 0.02);
+    }
+    return overrides;
+  }
 
   function cloneBrainToFloat(source) {
     const brain = source || getBot3Brain();
@@ -474,7 +589,8 @@ async function boot() {
       const center = game.world.finishCenter();
       const car = game.cars[carId];
       const enemy = game.cars[1 - carId];
-      const finishDist = Math.hypot(car.pos.x - center.x, car.pos.y - center.y);
+      const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
+      const finishDist = Math.hypot(finishVec.x, finishVec.y);
       const prevFinish = this.lastFinishDist[carId] ?? finishDist;
       const progress = prevFinish - finishDist;
       this.lastFinishDist[carId] = finishDist;
@@ -487,12 +603,37 @@ async function boot() {
       const myHpDelta = Math.max(0, prevMyHp - car.hp);
       this.lastMyHp[carId] = car.hp;
 
-      const speed = Math.min(1, Math.hypot(car.vel.x, car.vel.y) / 360);
+      const velMag = Math.hypot(car.vel.x, car.vel.y);
+      const speed = Math.min(1, velMag / 360);
 
       let reward = progress * this.config.rewards.progress;
       reward += enemyHpDelta * this.config.rewards.damage;
       reward -= myHpDelta * this.config.rewards.damageTaken;
-      reward += speed * this.config.rewards.speed;
+      if (progress > 0) {
+        reward += speed * this.config.rewards.speed;
+      }
+      const forwardBonusCfg = this.config.rewards.forwardBonus ?? 0;
+      const backwardPenaltyCfg = this.config.rewards.backwardPenalty ?? 0;
+      if (forwardBonusCfg > 0 || backwardPenaltyCfg > 0) {
+        const forwardDirLen = Math.hypot(finishVec.x, finishVec.y);
+        if (forwardDirLen > 1e-3 && velMag > 1e-3) {
+          const dot = (car.vel.x * finishVec.x + car.vel.y * finishVec.y) / (velMag * forwardDirLen);
+          const forwardComponent = Math.max(0, dot) * (velMag / 360);
+          reward += forwardComponent * forwardBonusCfg;
+          if (dot < -0.2) {
+            reward -= Math.abs(dot) * backwardPenaltyCfg;
+          }
+        }
+      }
+      reward -= this.config.rewards.timePenalty;
+
+      const loiterRadius = this.config.rewards.loiterRadius ?? 260;
+      if (finishDist < loiterRadius) {
+        const progressForward = Math.max(0, progress);
+        const progressNorm = Math.min(1, progressForward / 20);
+        const severity = 1 - progressNorm;
+        reward -= severity * this.config.rewards.loiterPenalty;
+      }
 
       if (car.reachedFinish && !this.finishBonusGiven[carId]) {
         reward += this.config.rewards.finishBonus;
@@ -529,9 +670,13 @@ async function boot() {
         if (!traj.length) continue;
         const last = traj[traj.length - 1];
         let terminalBonus = 0;
-        if (winner === carId) terminalBonus = this.config.rewards.winBonus;
-        else if (winner === null) terminalBonus = this.config.rewards.drawBonus;
-        else terminalBonus = -this.config.rewards.winBonus;
+        if (winner === carId) {
+          terminalBonus = this.config.rewards.winBonus;
+        } else if (winner === null || winner < 0) {
+          terminalBonus = this.config.rewards.drawBonus;
+        } else {
+          terminalBonus = -this.config.rewards.winBonus;
+        }
         last.reward += terminalBonus;
         this.stats.totalReward += terminalBonus;
         last.done = true;
@@ -631,12 +776,13 @@ async function boot() {
   }
 
   class Bot3PPOTrainer {
-    constructor(statusCb) {
-      this.config = BOT3_PPO_CONFIG;
+    constructor(statusCb, settings, configOverrides) {
+      this.config = createTrainerConfig(configOverrides);
       this.brain = cloneBrainToFloat(getBot3Brain());
       this.optimizer = createAdamState(this.brain);
       this.iteration = 0;
       this.statusCb = statusCb;
+      this.settings = settings || { randomizeSides: true, proceduralMaps: false };
     }
 
     report(msg) {
@@ -644,12 +790,21 @@ async function boot() {
     }
 
     async runMatch(buffer) {
+      const seed = Math.random() * 0xFFFFFFFF >>> 0;
+      const swapSpawns = this.settings.randomizeSides && ((seed & 1) === 1);
       const modules = [
         { decide: (input) => buffer.decide(0, input) },
         { decide: (input) => buffer.decide(1, input) },
       ];
-      const seed = Math.random() * 0xFFFFFFFF >>> 0;
-      const game = new Game({ seed, bots: modules, botNames: ["ML-A", "ML-B"] });
+      const game = new Game({
+        seed,
+        bots: modules,
+        botNames: ["ML-A", "ML-B"],
+        worldOptions: {
+          procedural: this.settings.proceduralMaps,
+          swapSpawns,
+        },
+      });
       buffer.bindGame(game);
       for (let step = 0; step < this.config.maxMatchSteps && !bot3TrainAbort && game.winner === null; step++) {
         game.step(1 / 60);
@@ -711,6 +866,8 @@ async function boot() {
       const totalMatches = dataset.stats.matches || 1;
       metrics.winRate = (dataset.stats.wins / totalMatches) * 100;
       metrics.matches = dataset.stats.matches;
+      metrics.totalReward = dataset.stats.totalReward || 0;
+      metrics.sampleCount = samples.length;
       return metrics;
     }
   }
@@ -730,7 +887,19 @@ async function boot() {
       if (btnSimStop) btnSimStop.disabled = true;
     }
 
-    const trainer = new Bot3PPOTrainer(updateBot3Status);
+    const trainingSettings = {
+      randomizeSides: getRandomizeSides(),
+      proceduralMaps: getProceduralMaps(),
+    };
+    const trainingOverrides = readTrainingOverrides();
+    const batchSteps = trainingOverrides.stepsPerBatch ?? BOT3_PPO_CONFIG.stepsPerBatch;
+    const lrUsed = trainingOverrides.lr ?? BOT3_PPO_CONFIG.lr;
+    const maxSec = Math.round((trainingOverrides.maxMatchSteps ?? BOT3_PPO_CONFIG.maxMatchSteps) / 60);
+    updateBot3Status(
+      `Self-play запущен (стороны: ${trainingSettings.randomizeSides ? "менять" : "фикс"}, карта: ${trainingSettings.proceduralMaps ? "проц." : "стат."}, ` +
+      `steps/batch: ${batchSteps}, lr: ${lrUsed}, T=${maxSec}s)`
+    );
+    const trainer = new Bot3PPOTrainer(updateBot3Status, trainingSettings, trainingOverrides);
     try {
       while (!bot3TrainAbort) {
         const dataset = await trainer.collectBatch();
@@ -741,6 +910,7 @@ async function boot() {
         setBot3Brain(plainBrain);
         commitBot3Brain(plainBrain);
         if (stats) {
+          pushBot3Reward(stats.totalReward ?? 0);
           updateBot3Status(`Итерация ${trainer.iteration}: reward ${stats.avgReward.toFixed(3)} | win ${stats.winRate.toFixed(1)}% (${stats.matches} матчей)`);
         }
       }
@@ -806,7 +976,12 @@ async function boot() {
 
       // Determine bot order for this simulation
       const ordered = orderBots(seed, selectedBots);
-      const g = new Game({ seed, bots: ordered.bots, botNames: ordered.names });
+      const g = new Game({
+        seed,
+        bots: ordered.bots,
+        botNames: ordered.names,
+        worldOptions: { procedural: getProceduralMaps() },
+      });
 
       let t = 0;
       // run match at speed multiplier (skip renders)
