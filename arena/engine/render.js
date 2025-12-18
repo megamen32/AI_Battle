@@ -23,6 +23,9 @@ export class Renderer {
     this.minZoom = 0.5;
     this.maxZoom = 10;
     this._smooth = 0.12; // camera smoothing factor (0..1)
+    this.autoZoomBias = 1;
+    this.autoZoomBiasMin = 0.1;
+    this.autoZoomBiasMax = 10.5;
   }
 
   // Convert canvas coordinates to world coordinates
@@ -65,6 +68,8 @@ export class Renderer {
       const targetZoomX = w / (bboxW + PAD * 2);
       const targetZoomY = h / (bboxH + PAD * 2);
       let targetZoom = Math.min(targetZoomX, targetZoomY);
+      targetZoom = Math.max(this.minZoom, Math.min(this.maxZoom, targetZoom));
+      targetZoom *= this.autoZoomBias;
       targetZoom = Math.max(this.minZoom, Math.min(this.maxZoom, targetZoom));
 
       // target camera top-left so that center of bbox lands at canvas center
@@ -269,5 +274,15 @@ export class Renderer {
         ctx.fillStyle = "rgba(214,221,230,0.75)";
         ctx.fillText("Reset to run again.", 40, 86);
       }
+  }
+
+  adjustAutoZoomBias(factor) {
+    if (!Number.isFinite(factor) || factor === 0) return;
+    const next = this.autoZoomBias * factor;
+    this.autoZoomBias = Math.max(this.autoZoomBiasMin, Math.min(this.autoZoomBiasMax, next));
+  }
+
+  resetAutoZoomBias() {
+    this.autoZoomBias = 1;
   }
 }

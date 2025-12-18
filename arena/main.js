@@ -1,5 +1,6 @@
 import { Game } from "./engine/game.js";
 import { Renderer } from "./engine/render.js";
+import { GAME_STEP_DT } from "./constants.js";
 import {
   getBrain as getBot3Brain,
   setBrain as setBot3Brain,
@@ -9,13 +10,16 @@ import {
   getLastSavedAt as getBot3LastSaved,
 } from "./bots/bot3Brain.js";
 import {
-  createFeatureExtractor as createBot3FeatureExtractor,
-  buildObservation as buildBot3Observation,
-  samplePolicyAction as sampleBot3PolicyAction,
-  evaluatePolicy as evalBot3Policy,
-  logProbFromEval as bot3LogProb,
-  gaussianEntropy as bot3GaussianEntropy,
-} from "./bots/bot3Policy.js";
+  cloneBrainToFloat,
+  floatBrainToPlain,
+  zeroBrainLike,
+  zeroGradients,
+  scaleBrainGradients,
+  createAdamState,
+  applyAdam,
+  shuffle,
+  accumulateGradients,
+} from "./bot3TrainingUtils.js";
 
 const canvas = document.getElementById("c");
 const statusEl = document.getElementById("status");
@@ -27,6 +31,7 @@ const botAEl = document.getElementById("botA");
 const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
 const proceduralMapsEl = document.getElementById("proceduralMaps");
+const mapSelectEl = document.getElementById("mapSelect");
 const bot3StepsEl = document.getElementById("bot3Steps");
 const bot3LrEl = document.getElementById("bot3Lr");
 const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
@@ -50,6 +55,11 @@ async function loadBot(path, slot = "") {
 async function boot() {
   const getRandomizeSides = () => randomizeSidesEl?.checked ?? true;
   const getProceduralMaps = () => proceduralMapsEl?.checked ?? false;
+  const getSelectedMapId = () => {
+    const val = parseInt(mapSelectEl?.value ?? "0", 10);
+    if (Number.isNaN(val)) return 0;
+    return Math.max(0, Math.min(4, val));
+  };
 
   async function loadSelectedBots() {
     const paths = [botAEl.value, botBEl.value];
@@ -66,7 +76,7 @@ async function boot() {
     return { bots: [modules[0], modules[1]], names: ["A", "B"], botAIndex: 0 };
   }
 
-  const FIXED_DT = 1 / 60; // детерминированный шаг
+  const FIXED_DT = GAME_STEP_DT; // детерминированный шаг
   let rafId = null;
   let game = null;
   let renderer = null;
@@ -89,7 +99,10 @@ async function boot() {
     const ordered = orderBots(newSeed, selectedBots);
     const [bot0, bot1] = ordered.bots;
     const [name0, name1] = ordered.names;
-    const worldOptions = { procedural: getProceduralMaps() };
+    const worldOptions = {
+      randomPreset: getProceduralMaps(),
+      presetId: getSelectedMapId(),
+    };
 
     // recreate game and renderer
     game = new Game({ seed: newSeed, bots: [bot0, bot1], botNames: [name0, name1], worldOptions });
@@ -119,12 +132,21 @@ async function boot() {
       e.preventDefault();
       const zoomSpeed = 0.1;
       const delta = e.deltaY > 0 ? -zoomSpeed : zoomSpeed;
-      const newZoom = renderer.camera.zoom * (1 + delta);
-      renderer.camera.zoom = Math.max(0.5, Math.min(10, newZoom));
+      if (renderer.autoFollow && !renderer.isDragging) {
+        const factor = delta > 0 ? 1 + Math.abs(delta) : 1 / (1 + Math.abs(delta));
+        renderer.adjustAutoZoomBias(factor);
+      } else {
+        const newZoom = renderer.camera.zoom * (1 + delta);
+        renderer.camera.zoom = Math.max(0.5, Math.min(10, newZoom));
+      }
     };
 
     const handleMouseDown = (e) => {
-      if (e.button === 0) { // right-click
+      if (e.button === 0) {
+        if (renderer.autoFollow) {
+          renderer.autoFollow = false;
+          if (camAutoFollow) camAutoFollow.checked = false;
+        }
         renderer.isDragging = true;
         renderer.dragStart = { x: e.clientX, y: e.clientY };
       }
@@ -191,12 +213,13 @@ async function boot() {
 
   // wire buttons
   btnReset.onclick = async () => {
-    stopRun();
     if (simRunning) {
       simRunning = false;
       if (btnSimStart) btnSimStart.disabled = false;
       if (btnSimStop) btnSimStop.disabled = true;
     }
+    loadBot3Brain();
+    updateBot3Status();
     await startRun();
   };
 
@@ -238,6 +261,7 @@ async function boot() {
 
   const bot3RewardHistory = [];
   const BOT3_CHART_HISTORY = 120;
+  let bot3StatusMessage = "Мозг загружен и готов к обучению (PPO + self-play).";
 
   function renderBot3Chart() {
     if (!bot3ChartEl) return;
@@ -296,11 +320,13 @@ async function boot() {
 
   function updateBot3Status(text) {
     if (!bot3StatusEl) return;
+    if (typeof text === "string") bot3StatusMessage = text;
     const savedText = formatTimestamp(getBot3LastSaved());
-    bot3StatusEl.textContent = text ? `${text}\n${savedText}` : savedText;
+    const head = bot3StatusMessage ? `${bot3StatusMessage}\n${savedText}` : savedText;
+    bot3StatusEl.textContent = head;
   }
 
-  updateBot3Status("Мозг загружен и готов к обучению (PPO + self-play).");
+  updateBot3Status(bot3StatusMessage);
   renderBot3Chart();
 
   if (btnBot3Reset) {
@@ -314,6 +340,7 @@ async function boot() {
 
   let bot3Training = false;
   let bot3TrainAbort = false;
+  let activeBot3Trainer = null;
 
   const BOT3_PPO_CONFIG = {
     stepsPerBatch: 2048,
@@ -384,395 +411,160 @@ async function boot() {
     return overrides;
   }
 
-  function cloneBrainToFloat(source) {
-    const brain = source || getBot3Brain();
-    return {
-      version: brain.version,
-      obsSize: brain.obsSize,
-      hiddenSize: brain.hiddenSize,
-      actionSize: brain.actionSize,
-      core: {
-        w1: Float64Array.from(brain.core.w1),
-        b1: Float64Array.from(brain.core.b1),
-      },
-      actor: {
-        wMean: Float64Array.from(brain.actor.wMean),
-        bMean: Float64Array.from(brain.actor.bMean),
-        logStd: Float64Array.from(brain.actor.logStd),
-        wShoot: Float64Array.from(brain.actor.wShoot),
-        bShoot: brain.actor.bShoot || 0,
-      },
-      critic: {
-        wValue: Float64Array.from(brain.critic.wValue),
-        bValue: brain.critic.bValue || 0,
-      },
-    };
+  function setTrainingInputsDisabled(disabled) {
+    if (bot3StepsEl) bot3StepsEl.disabled = disabled;
+    if (bot3LrEl) bot3LrEl.disabled = disabled;
+    if (bot3MaxTimeEl) bot3MaxTimeEl.disabled = disabled;
+    if (bot3EntropyEl) bot3EntropyEl.disabled = disabled;
   }
 
-  function floatBrainToPlain(brain) {
-    return {
-      version: brain.version,
-      obsSize: brain.obsSize,
-      hiddenSize: brain.hiddenSize,
-      actionSize: brain.actionSize,
-      core: {
-        w1: Array.from(brain.core.w1),
-        b1: Array.from(brain.core.b1),
-      },
-      actor: {
-        wMean: Array.from(brain.actor.wMean),
-        bMean: Array.from(brain.actor.bMean),
-        logStd: Array.from(brain.actor.logStd),
-        wShoot: Array.from(brain.actor.wShoot),
-        bShoot: brain.actor.bShoot,
-      },
-      critic: {
-        wValue: Array.from(brain.critic.wValue),
-        bValue: brain.critic.bValue,
-      },
-    };
-  }
 
-  function zeroBrainLike(brain) {
-    return {
-      core: {
-        w1: new Float64Array(brain.core.w1.length),
-        b1: new Float64Array(brain.core.b1.length),
-      },
-      actor: {
-        wMean: new Float64Array(brain.actor.wMean.length),
-        bMean: new Float64Array(brain.actor.bMean.length),
-        logStd: new Float64Array(brain.actor.logStd.length),
-        wShoot: new Float64Array(brain.actor.wShoot.length),
-        bShoot: 0,
-      },
-      critic: {
-        wValue: new Float64Array(brain.critic.wValue.length),
-        bValue: 0,
-      },
-    };
-  }
-
-  function zeroGradients(grads) {
-    grads.core.w1.fill(0);
-    grads.core.b1.fill(0);
-    grads.actor.wMean.fill(0);
-    grads.actor.bMean.fill(0);
-    grads.actor.logStd.fill(0);
-    grads.actor.wShoot.fill(0);
-    grads.actor.bShoot = 0;
-    grads.critic.wValue.fill(0);
-    grads.critic.bValue = 0;
-  }
-
-  function scaleBrainGradients(grads, scale) {
-    for (let i = 0; i < grads.core.w1.length; i++) grads.core.w1[i] *= scale;
-    for (let i = 0; i < grads.core.b1.length; i++) grads.core.b1[i] *= scale;
-    for (let i = 0; i < grads.actor.wMean.length; i++) grads.actor.wMean[i] *= scale;
-    for (let i = 0; i < grads.actor.bMean.length; i++) grads.actor.bMean[i] *= scale;
-    for (let i = 0; i < grads.actor.logStd.length; i++) grads.actor.logStd[i] *= scale;
-    for (let i = 0; i < grads.actor.wShoot.length; i++) grads.actor.wShoot[i] *= scale;
-    for (let i = 0; i < grads.critic.wValue.length; i++) grads.critic.wValue[i] *= scale;
-    grads.actor.bShoot *= scale;
-    grads.critic.bValue *= scale;
-  }
-
-  function createAdamState(brain) {
-    return {
-      t: 0,
-      m: zeroBrainLike(brain),
-      v: zeroBrainLike(brain),
-    };
-  }
-
-  function applyAdam(brain, grads, optState, lr) {
-    const beta1 = 0.9;
-    const beta2 = 0.999;
-    const eps = 1e-8;
-    optState.t += 1;
-    const t = optState.t;
-    const biasCorr1 = 1 - Math.pow(beta1, t);
-    const biasCorr2 = 1 - Math.pow(beta2, t);
-
-    const updateArray = (param, grad, mArr, vArr) => {
-      for (let i = 0; i < param.length; i++) {
-        const g = grad[i];
-        const mVal = mArr[i] = beta1 * mArr[i] + (1 - beta1) * g;
-        const vVal = vArr[i] = beta2 * vArr[i] + (1 - beta2) * g * g;
-        const mHat = mVal / biasCorr1;
-        const vHat = vVal / biasCorr2;
-        param[i] -= lr * mHat / (Math.sqrt(vHat) + eps);
-      }
-    };
-
-    updateArray(brain.core.w1, grads.core.w1, optState.m.core.w1, optState.v.core.w1);
-    updateArray(brain.core.b1, grads.core.b1, optState.m.core.b1, optState.v.core.b1);
-    updateArray(brain.actor.wMean, grads.actor.wMean, optState.m.actor.wMean, optState.v.actor.wMean);
-    updateArray(brain.actor.bMean, grads.actor.bMean, optState.m.actor.bMean, optState.v.actor.bMean);
-    updateArray(brain.actor.logStd, grads.actor.logStd, optState.m.actor.logStd, optState.v.actor.logStd);
-    updateArray(brain.actor.wShoot, grads.actor.wShoot, optState.m.actor.wShoot, optState.v.actor.wShoot);
-    updateArray(brain.critic.wValue, grads.critic.wValue, optState.m.critic.wValue, optState.v.critic.wValue);
-
-    const updateScalar = (paramRef, gradVal, mRef, vRef) => {
-      const mVal = beta1 * mRef + (1 - beta1) * gradVal;
-      const vVal = beta2 * vRef + (1 - beta2) * gradVal * gradVal;
-      const mHat = mVal / biasCorr1;
-      const vHat = vVal / biasCorr2;
-      return { nextParam: paramRef - lr * mHat / (Math.sqrt(vHat) + eps), nextM: mVal, nextV: vVal };
-    };
-
-    const shootUpdate = updateScalar(brain.actor.bShoot, grads.actor.bShoot, optState.m.actor.bShoot, optState.v.actor.bShoot);
-    brain.actor.bShoot = shootUpdate.nextParam;
-    optState.m.actor.bShoot = shootUpdate.nextM;
-    optState.v.actor.bShoot = shootUpdate.nextV;
-
-    const valueUpdate = updateScalar(brain.critic.bValue, grads.critic.bValue, optState.m.critic.bValue, optState.v.critic.bValue);
-    brain.critic.bValue = valueUpdate.nextParam;
-    optState.m.critic.bValue = valueUpdate.nextM;
-    optState.v.critic.bValue = valueUpdate.nextV;
-  }
-
-  function shuffle(arr) {
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-  }
-
-  class Bot3ExperienceBuffer {
-    constructor(trainer) {
-      this.trainer = trainer;
-      this.config = trainer.config;
-      this.featureStates = [createBot3FeatureExtractor(), createBot3FeatureExtractor()];
-      this.pending = [null, null];
-      this.trajectories = [[], []];
-      this.finishBonusGiven = [false, false];
-      this.lastFinishDist = [null, null];
-      this.lastEnemyHp = [null, null];
-      this.lastMyHp = [null, null];
-      this.stepCount = 0;
-      this.stats = { matches: 0, wins: 0, losses: 0, draws: 0, totalReward: 0 };
+  class Bot3WorkerPool {
+    constructor({ config, settings }) {
+      this.config = config;
+      this.settings = settings;
+      this.workers = [];
+      this.ready = false;
+      this.aborting = false;
+      this.workerCount = Bot3WorkerPool.computeWorkerCount();
     }
 
-    bindGame(game) {
-      const center = game.world.finishCenter();
-      this.pending[0] = null;
-      this.pending[1] = null;
-      for (let i = 0; i < 2; i++) {
-        const car = game.cars[i];
-        const enemy = game.cars[1 - i];
-        this.lastFinishDist[i] = Math.hypot(car.pos.x - center.x, car.pos.y - center.y);
-        this.lastEnemyHp[i] = enemy.hp;
-        this.lastMyHp[i] = car.hp;
-        this.finishBonusGiven[i] = false;
-        this.featureStates[i] = createBot3FeatureExtractor();
-      }
+    static isSupported() {
+      return typeof Worker !== "undefined";
     }
 
-    decide(carId, input) {
-      const obs = buildBot3Observation(this.featureStates[carId], input);
-      const sample = sampleBot3PolicyAction(this.trainer.brain, obs, Math.random);
-      const transition = {
-        obs,
-        actionRaw: Float64Array.from(sample.rawAction),
-        shoot: sample.shoot,
-        logp: sample.logp,
-        value: sample.value,
-        reward: 0,
-        done: false,
-      };
-      this.pending[carId] = transition;
-      return sample.controls;
+    static computeWorkerCount() {
+      const cores = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 0) : 0;
+      const base = cores > 0 ? Math.max(1, cores - 1) : 2;
+      return Math.min(6, base);
     }
 
-    computeReward(game, carId) {
-      const center = game.world.finishCenter();
-      const car = game.cars[carId];
-      const enemy = game.cars[1 - carId];
-      const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
-      const finishDist = Math.hypot(finishVec.x, finishVec.y);
-      const prevFinish = this.lastFinishDist[carId] ?? finishDist;
-      const progress = prevFinish - finishDist;
-      this.lastFinishDist[carId] = finishDist;
-
-      const prevEnemyHp = this.lastEnemyHp[carId] ?? enemy.hp;
-      const enemyHpDelta = Math.max(0, prevEnemyHp - enemy.hp);
-      this.lastEnemyHp[carId] = enemy.hp;
-
-      const prevMyHp = this.lastMyHp[carId] ?? car.hp;
-      const myHpDelta = Math.max(0, prevMyHp - car.hp);
-      this.lastMyHp[carId] = car.hp;
-
-      const velMag = Math.hypot(car.vel.x, car.vel.y);
-      const speed = Math.min(1, velMag / 360);
-
-      let reward = progress * this.config.rewards.progress;
-      reward += enemyHpDelta * this.config.rewards.damage;
-      reward -= myHpDelta * this.config.rewards.damageTaken;
-      if (progress > 0) {
-        reward += speed * this.config.rewards.speed;
-      }
-      const forwardBonusCfg = this.config.rewards.forwardBonus ?? 0;
-      const backwardPenaltyCfg = this.config.rewards.backwardPenalty ?? 0;
-      if (forwardBonusCfg > 0 || backwardPenaltyCfg > 0) {
-        const forwardDirLen = Math.hypot(finishVec.x, finishVec.y);
-        if (forwardDirLen > 1e-3 && velMag > 1e-3) {
-          const dot = (car.vel.x * finishVec.x + car.vel.y * finishVec.y) / (velMag * forwardDirLen);
-          const forwardComponent = Math.max(0, dot) * (velMag / 360);
-          reward += forwardComponent * forwardBonusCfg;
-          if (dot < -0.2) {
-            reward -= Math.abs(dot) * backwardPenaltyCfg;
+    async init(initialBrain) {
+      if (!Bot3WorkerPool.isSupported()) return false;
+      this.workerCount = Math.max(1, this.workerCount || 1);
+      const workerUrl = new URL("./bot3Worker.js", import.meta.url);
+      const initPromises = [];
+      for (let i = 0; i < this.workerCount; i++) {
+        const worker = new Worker(workerUrl, { type: "module" });
+        const state = {
+          id: i,
+          worker,
+          readyPromise: null,
+          resolveReady: null,
+          rejectReady: null,
+          task: null,
+        };
+        state.readyPromise = new Promise((resolve, reject) => {
+          state.resolveReady = resolve;
+          state.rejectReady = reject;
+        });
+        worker.onmessage = (event) => this.handleMessage(state, event.data);
+        worker.onerror = (err) => {
+          if (state.task) {
+            state.task.reject(err?.error || err?.message || err);
+            state.task = null;
           }
+        };
+        this.workers.push(state);
+        worker.postMessage({
+          type: "init",
+          workerId: i,
+          config: this.config,
+          settings: this.settings,
+          brain: initialBrain,
+        });
+        initPromises.push(state.readyPromise);
+      }
+      await Promise.all(initPromises);
+      this.ready = true;
+      return true;
+    }
+
+    handleMessage(state, data) {
+      const payload = data || {};
+      if (payload.type === "ready") {
+        state.resolveReady?.();
+        state.resolveReady = null;
+        state.rejectReady = null;
+      } else if (payload.type === "batch" || payload.type === "error" || payload.type === "aborted") {
+        if (state.task) {
+          if (payload.type === "error") {
+            state.task.reject(new Error(payload.message || "Worker error"));
+          } else if (payload.type === "aborted") {
+            state.task.resolve({ aborted: true });
+          } else {
+            state.task.resolve({ dataset: payload.dataset, stepCount: payload.stepCount || 0 });
+          }
+          state.task = null;
         }
       }
-      reward -= this.config.rewards.timePenalty;
+    }
 
-      const loiterRadius = this.config.rewards.loiterRadius ?? 260;
-      if (finishDist < loiterRadius) {
-        const progressForward = Math.max(0, progress);
-        const progressNorm = Math.min(1, progressForward / 20);
-        const severity = 1 - progressNorm;
-        reward -= severity * this.config.rewards.loiterPenalty;
+    runCollect(state, targetSteps) {
+      if (!state.worker) return Promise.resolve(null);
+      return new Promise((resolve, reject) => {
+        state.task = { resolve, reject };
+        state.worker.postMessage({ type: "collect", workerId: state.id, targetSteps });
+      });
+    }
+
+    async collectBatch(totalSteps) {
+      if (!this.ready || !this.workers.length) return null;
+      this.aborting = false;
+      const workerCount = this.workers.length;
+      const baseSteps = Math.max(1, Math.floor(totalSteps / workerCount));
+      let remainder = Math.max(0, totalSteps - baseSteps * workerCount);
+      const tasks = this.workers.map((state) => {
+        const extra = remainder > 0 ? 1 : 0;
+        if (remainder > 0) remainder--;
+        const target = baseSteps + extra;
+        return this.runCollect(state, target);
+      });
+      const results = await Promise.allSettled(tasks);
+      if (this.aborting) return { samples: [], stats: { matches: 0, wins: 0, losses: 0, draws: 0, totalReward: 0 } };
+      const merged = { samples: [], stats: { matches: 0, wins: 0, losses: 0, draws: 0, totalReward: 0 } };
+      for (const res of results) {
+        if (res.status !== "fulfilled") continue;
+        const value = res.value;
+        if (!value || value.aborted || !value.dataset) continue;
+        const dataset = value.dataset;
+        merged.samples.push(...dataset.samples);
+        merged.stats.matches += dataset.stats?.matches || 0;
+        merged.stats.wins += dataset.stats?.wins || 0;
+        merged.stats.losses += dataset.stats?.losses || 0;
+        merged.stats.draws += dataset.stats?.draws || 0;
+        merged.stats.totalReward += dataset.stats?.totalReward || 0;
       }
-
-      if (car.reachedFinish && !this.finishBonusGiven[carId]) {
-        reward += this.config.rewards.finishBonus;
-        this.finishBonusGiven[carId] = true;
-      }
-      if (enemy.hp <= 0 && prevEnemyHp > 0) reward += this.config.rewards.killBonus;
-      if (car.hp <= 0 && prevMyHp > 0) reward -= this.config.rewards.killBonus;
-
-      return reward;
+      return merged;
     }
 
-    afterStep(game) {
-      for (let carId = 0; carId < 2; carId++) {
-        const pending = this.pending[carId];
-        if (!pending) continue;
-        pending.reward = this.computeReward(game, carId);
-        pending.done = false;
-        this.stats.totalReward += pending.reward;
-        this.trajectories[carId].push(pending);
-        this.pending[carId] = null;
-        this.stepCount++;
+    async updateBrain(brainPlain) {
+      if (!this.ready) return;
+      await Promise.all(this.workers.map((state) => {
+        return new Promise((resolve) => {
+          state.worker.postMessage({ type: "updateBrain", workerId: state.id, brain: brainPlain });
+          resolve();
+        });
+      }));
+    }
+
+    requestAbort() {
+      if (!this.workers.length) return;
+      this.aborting = true;
+      for (const state of this.workers) {
+        state.worker.postMessage({ type: "abort", workerId: state.id });
       }
     }
 
-    finalizeEpisode(game) {
-      const winner = game.winner;
-      if (winner === 0) this.stats.wins++;
-      else if (winner === 1) this.stats.losses++;
-      else this.stats.draws++;
-      this.stats.matches++;
-
-      for (let carId = 0; carId < 2; carId++) {
-        const traj = this.trajectories[carId];
-        if (!traj.length) continue;
-        const last = traj[traj.length - 1];
-        let terminalBonus = 0;
-        if (winner === carId) {
-          terminalBonus = this.config.rewards.winBonus;
-        } else if (winner === null || winner < 0) {
-          terminalBonus = this.config.rewards.drawBonus;
-        } else {
-          terminalBonus = -this.config.rewards.winBonus;
-        }
-        last.reward += terminalBonus;
-        this.stats.totalReward += terminalBonus;
-        last.done = true;
+    async shutdown() {
+      if (!this.workers.length) return;
+      for (const state of this.workers) {
+        state.worker.postMessage({ type: "shutdown", workerId: state.id });
+        state.worker.terminate();
       }
+      this.workers = [];
+      this.ready = false;
     }
-
-    buildDataset(gamma, lam) {
-      const samples = [];
-      for (let carId = 0; carId < 2; carId++) {
-        const traj = this.trajectories[carId];
-        if (!traj.length) continue;
-        let nextAdv = 0;
-        let nextValue = 0;
-        for (let i = traj.length - 1; i >= 0; i--) {
-          const step = traj[i];
-          const delta = step.reward + gamma * nextValue * (step.done ? 0 : 1) - step.value;
-          const adv = delta + gamma * lam * nextAdv * (step.done ? 0 : 1);
-          step.adv = adv;
-          step.ret = adv + step.value;
-          nextAdv = adv;
-          nextValue = step.value;
-        }
-        samples.push(...traj);
-        this.trajectories[carId] = [];
-      }
-      return { samples, stats: this.stats };
-    }
-  }
-
-  function accumulateGradients(brain, grads, sample, config) {
-    const evalRes = evalBot3Policy(brain, sample.obs);
-    const logpNew = bot3LogProb(evalRes, sample.actionRaw, sample.shoot);
-    const ratio = Math.exp(logpNew - sample.logp);
-    const clipHi = 1 + config.clipRatio;
-    const clipLo = 1 - config.clipRatio;
-    const adv = sample.normAdv;
-    const unclipped = ratio * adv;
-    const clippedRatio = adv >= 0 ? Math.min(ratio, clipHi) : Math.max(ratio, clipLo);
-    const clippedVal = clippedRatio * adv;
-    const useClipped = (adv >= 0 && ratio > clipHi) || (adv < 0 && ratio < clipLo);
-    const policyCoeff = useClipped ? 0 : -adv * ratio;
-
-    const hidden = evalRes.hidden;
-    const hiddenSize = brain.hiddenSize;
-    const gradHidden = new Float64Array(hiddenSize);
-
-    const std = evalRes.logStd.map(ls => Math.exp(ls));
-    let policyLoss = -Math.min(unclipped, clippedVal);
-
-    for (let i = 0; i < brain.actionSize; i++) {
-      const diff = sample.actionRaw[i] - evalRes.mean[i];
-      const varTerm = std[i] * std[i];
-      const gradMean = policyCoeff * (diff / varTerm);
-      const base = i * hiddenSize;
-      for (let h = 0; h < hiddenSize; h++) {
-        grads.actor.wMean[base + h] += gradMean * hidden[h];
-        gradHidden[h] += gradMean * brain.actor.wMean[base + h];
-      }
-      grads.actor.bMean[i] += gradMean;
-      const gradLogStd = policyCoeff * ((diff * diff) / varTerm - 1) - config.entropyCoef;
-      grads.actor.logStd[i] += gradLogStd;
-    }
-
-    const shootErr = sample.shoot - evalRes.shootProb;
-    const gradShoot = policyCoeff * shootErr;
-    for (let h = 0; h < hiddenSize; h++) {
-      grads.actor.wShoot[h] += gradShoot * hidden[h];
-      gradHidden[h] += gradShoot * brain.actor.wShoot[h];
-    }
-    grads.actor.bShoot += gradShoot;
-
-    const valueErr = evalRes.value - sample.ret;
-    const gradValue = valueErr * config.valueCoef;
-    for (let h = 0; h < hiddenSize; h++) {
-      grads.critic.wValue[h] += gradValue * hidden[h];
-      gradHidden[h] += gradValue * brain.critic.wValue[h];
-    }
-    grads.critic.bValue += gradValue;
-
-    for (let h = 0; h < hiddenSize; h++) {
-      const dz = gradHidden[h] * (1 - hidden[h] * hidden[h]);
-      const base = h * brain.obsSize;
-      for (let j = 0; j < brain.obsSize; j++) {
-        grads.core.w1[base + j] += dz * sample.obs[j];
-      }
-      grads.core.b1[h] += dz;
-    }
-
-    const gaussianEnt = bot3GaussianEntropy(evalRes.logStd);
-    const shootEntropy = -(evalRes.shootProb * Math.log(evalRes.shootProb + 1e-6) + (1 - evalRes.shootProb) * Math.log(1 - evalRes.shootProb + 1e-6));
-
-    return {
-      policyLoss,
-      valueLoss: 0.5 * valueErr * valueErr,
-      entropy: gaussianEnt + shootEntropy,
-    };
   }
 
   class Bot3PPOTrainer {
@@ -783,10 +575,46 @@ async function boot() {
       this.iteration = 0;
       this.statusCb = statusCb;
       this.settings = settings || { randomizeSides: true, proceduralMaps: false };
+      this.workerPool = null;
     }
 
     report(msg) {
       if (this.statusCb) this.statusCb(msg);
+    }
+
+    async ensureWorkerPool() {
+      if (this.workerPool || bot3TrainAbort) return;
+      if (!Bot3WorkerPool.isSupported()) {
+        throw new Error("Web Workers недоступны — не могу запустить обучение без них.");
+      }
+      const pool = new Bot3WorkerPool({ config: this.config, settings: this.settings });
+      let ok = false;
+      try {
+        ok = await pool.init(floatBrainToPlain(this.brain));
+      } catch (err) {
+        console.warn("Failed to init bot3 worker pool", err);
+      }
+      if (!ok) {
+        await pool.shutdown();
+        throw new Error("Не удалось запустить фоновые воркеры для self-play.");
+      }
+      this.workerPool = pool;
+      this.report(`Параллельный self-play: ${pool.workers.length} поток(ов).`);
+    }
+
+    requestAbort() {
+      this.workerPool?.requestAbort();
+    }
+
+    async shutdown() {
+      await this.workerPool?.shutdown();
+      this.workerPool = null;
+    }
+
+    async syncWorkers() {
+      if (this.workerPool) {
+        await this.workerPool.updateBrain(floatBrainToPlain(this.brain));
+      }
     }
 
     async runMatch(buffer) {
@@ -801,13 +629,14 @@ async function boot() {
         bots: modules,
         botNames: ["ML-A", "ML-B"],
         worldOptions: {
-          procedural: this.settings.proceduralMaps,
+          randomPreset: this.settings.randomPreset,
+          presetId: this.settings.presetId,
           swapSpawns,
         },
       });
       buffer.bindGame(game);
       for (let step = 0; step < this.config.maxMatchSteps && !bot3TrainAbort && game.winner === null; step++) {
-        game.step(1 / 60);
+        game.step(GAME_STEP_DT);
         buffer.afterStep(game);
       }
       buffer.finalizeEpisode(game);
@@ -815,12 +644,11 @@ async function boot() {
     }
 
     async collectBatch() {
-      const buffer = new Bot3ExperienceBuffer(this);
-      while (buffer.stepCount < this.config.stepsPerBatch && !bot3TrainAbort) {
-        await this.runMatch(buffer);
-        this.report(`Сбор опыта: ${buffer.stepCount}/${this.config.stepsPerBatch}`);
-      }
-      return buffer.buildDataset(this.config.gamma, this.config.lam);
+      await this.ensureWorkerPool();
+      if (!this.workerPool || bot3TrainAbort) return { samples: [], stats: { matches: 0, wins: 0, losses: 0, draws: 0, totalReward: 0 } };
+      this.report(`Сбор опыта параллельно (${this.workerPool.workers.length} потоков)...`);
+      const dataset = await this.workerPool.collectBatch(this.config.stepsPerBatch);
+      return dataset || { samples: [], stats: { matches: 0, wins: 0, losses: 0, draws: 0, totalReward: 0 } };
     }
 
     updatePolicy(dataset) {
@@ -880,7 +708,7 @@ async function boot() {
       btnBot3Train.textContent = "Остановить обучение";
       btnBot3Train.disabled = false;
     }
-    stopRun();
+    setTrainingInputsDisabled(true);
     if (simRunning) {
       simRunning = false;
       if (btnSimStart) btnSimStart.disabled = false;
@@ -889,26 +717,30 @@ async function boot() {
 
     const trainingSettings = {
       randomizeSides: getRandomizeSides(),
-      proceduralMaps: getProceduralMaps(),
+      randomPreset: getProceduralMaps(),
+      presetId: getSelectedMapId(),
     };
     const trainingOverrides = readTrainingOverrides();
     const batchSteps = trainingOverrides.stepsPerBatch ?? BOT3_PPO_CONFIG.stepsPerBatch;
     const lrUsed = trainingOverrides.lr ?? BOT3_PPO_CONFIG.lr;
     const maxSec = Math.round((trainingOverrides.maxMatchSteps ?? BOT3_PPO_CONFIG.maxMatchSteps) / 60);
+    const mapLabel = trainingSettings.randomPreset ? "случ. из 5" : `№${trainingSettings.presetId + 1}`;
     updateBot3Status(
-      `Self-play запущен (стороны: ${trainingSettings.randomizeSides ? "менять" : "фикс"}, карта: ${trainingSettings.proceduralMaps ? "проц." : "стат."}, ` +
+      `Self-play запущен (стороны: ${trainingSettings.randomizeSides ? "менять" : "фикс"}, карта: ${mapLabel}, ` +
       `steps/batch: ${batchSteps}, lr: ${lrUsed}, T=${maxSec}s)`
     );
     const trainer = new Bot3PPOTrainer(updateBot3Status, trainingSettings, trainingOverrides);
+    activeBot3Trainer = trainer;
     try {
       while (!bot3TrainAbort) {
         const dataset = await trainer.collectBatch();
-        if (bot3TrainAbort || !dataset.samples.length) break;
+        if (bot3TrainAbort || !dataset || !dataset.samples || !dataset.samples.length) break;
         const stats = trainer.updatePolicy(dataset);
         trainer.iteration++;
         const plainBrain = floatBrainToPlain(trainer.brain);
         setBot3Brain(plainBrain);
         commitBot3Brain(plainBrain);
+        await trainer.syncWorkers();
         if (stats) {
           pushBot3Reward(stats.totalReward ?? 0);
           updateBot3Status(`Итерация ${trainer.iteration}: reward ${stats.avgReward.toFixed(3)} | win ${stats.winRate.toFixed(1)}% (${stats.matches} матчей)`);
@@ -923,10 +755,12 @@ async function boot() {
       console.error(err);
       updateBot3Status(`Ошибка обучения: ${err?.message || err}`);
     } finally {
+      await trainer.shutdown();
+      activeBot3Trainer = null;
       bot3Training = false;
       bot3TrainAbort = false;
+      setTrainingInputsDisabled(false);
       if (btnBot3Train) btnBot3Train.textContent = "Начать обучение";
-      await startRun();
     }
   }
 
@@ -935,6 +769,7 @@ async function boot() {
       if (bot3Training) {
         bot3TrainAbort = true;
         updateBot3Status("Останавливаем обучение, дождитесь завершения итерации...");
+        activeBot3Trainer?.requestAbort();
       } else {
         runBot3Training().catch((err) => console.error(err));
       }
@@ -943,93 +778,206 @@ async function boot() {
 
   let simRunning = false;
   let simStats = { aWins: 0, bWins: 0, draws: 0, total: 0 };
+  const fastSimState = { workers: [] };
+  let fastSimAbortRequested = false;
 
-  async function runFastSim() {
-    const numMatches = parseInt(simMatchesEl.value) || 100;
-    const speed = parseInt(simSpeedEl.value) || 10;
+  const FAST_SIM_DT = GAME_STEP_DT;
+  const FAST_SIM_MAX_TIME = 120;
 
-    simRunning = true;
-    simStats = { aWins: 0, bWins: 0, draws: 0, total: 0 };
-    btnSimStart.disabled = true;
-    btnSimStop.disabled = false;
+  function updateSimResultsDisplay(totalTarget) {
+    if (!simResultsEl) return;
+    simResultsEl.textContent = `Matches: ${simStats.total}/${totalTarget}\nA wins: ${simStats.aWins}\nB wins: ${simStats.bWins}\nDraws: ${simStats.draws}`;
+  }
 
-    const FIXED_DT = 1 / 60;
-    const MAX_TIME = 120; // max 2 minutes per match
-
-    statusEl.textContent = "Loading bots for simulation...";
-    let selectedBots;
-    try {
-      selectedBots = await loadSelectedBots();
-    } catch (err) {
-      statusEl.textContent = `ERROR loading bots: ${err?.message || err}`;
-      simRunning = false;
-      btnSimStart.disabled = false;
-      btnSimStop.disabled = true;
-      return;
+  function snapshotLocalStorage() {
+    if (typeof localStorage === "undefined") return [];
+    const entries = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      try {
+        entries.push({ key, value: localStorage.getItem(key) });
+      } catch (err) {
+        console.warn("Failed to snapshot localStorage key", key, err);
+      }
     }
+    return entries;
+  }
 
-    statusEl.textContent = "Running fast simulation...";
+  function terminateFastSimWorkers() {
+    if (!fastSimState.workers.length) return;
+    for (const worker of fastSimState.workers) {
+      try { worker.terminate(); } catch (err) { console.warn("Failed to terminate fast sim worker", err); }
+    }
+    fastSimState.workers = [];
+  }
 
-    for (let m = 0; m < numMatches && simRunning; m++) {
-      // random seed for each match
+  async function runFastSimSequential(selectedBots, cfg) {
+    const maxSteps = cfg.maxTime * 60;
+    for (let m = 0; m < cfg.numMatches && simRunning; m++) {
       const seed = Math.random() * 0xFFFFFFFF >>> 0;
-
-      // Determine bot order for this simulation
       const ordered = orderBots(seed, selectedBots);
-      const g = new Game({
+      const game = new Game({
         seed,
         bots: ordered.bots,
         botNames: ordered.names,
-        worldOptions: { procedural: getProceduralMaps() },
+        worldOptions: {
+          randomPreset: cfg.randomPreset,
+          presetId: cfg.presetId,
+        },
       });
 
-      let t = 0;
-      // run match at speed multiplier (skip renders)
-      for (let step = 0; step < (MAX_TIME * 60) && !g.winner && simRunning; step++) {
-        for (let s = 0; s < speed && !g.winner; s++) {
-          g.step(FIXED_DT);
+      for (let step = 0; step < maxSteps && !game.winner && simRunning; step++) {
+        for (let s = 0; s < cfg.speed && !game.winner && simRunning; s++) {
+          game.step(FAST_SIM_DT);
         }
       }
 
-      // record result - track by bot script, not position
-      // Position of original botA in game (0 if not swapped, 1 if swapped)
       const botAActualId = ordered.botAIndex;
-      
       simStats.total++;
-      if (g.winner === null) {
+      if (game.winner === null || game.winner === -1) {
         simStats.draws++;
-      } else if (g.winner === botAActualId) {
-        simStats.aWins++;  // original botA won
+      } else if (game.winner === botAActualId) {
+        simStats.aWins++;
       } else {
-        simStats.bWins++;  // original botB won
+        simStats.bWins++;
       }
 
-      // update display every 10 matches
-      if (m % 10 === 0 || m === numMatches - 1) {
-        simResultsEl.textContent = `Matches: ${simStats.total}/${numMatches}\nA wins: ${simStats.aWins}\nB wins: ${simStats.bWins}\nDraws: ${simStats.draws}`;
-        // yield to browser
+      if (m % 10 === 0 || m === cfg.numMatches - 1) {
+        updateSimResultsDisplay(cfg.numMatches);
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     }
+  }
 
-    simRunning = false;
-    btnSimStart.disabled = false;
-    btnSimStop.disabled = true;
-    statusEl.textContent = "Fast simulation complete.";
-    
-    // final stats
-    const aRate = ((simStats.aWins / simStats.total) * 100).toFixed(1);
-    const bRate = ((simStats.bWins / simStats.total) * 100).toFixed(1);
-    simResultsEl.textContent = `FINAL RESULTS\n\nMatches: ${simStats.total}\nA wins: ${simStats.aWins} (${aRate}%)\nB wins: ${simStats.bWins} (${bRate}%)\nDraws: ${simStats.draws}`;
+  async function runFastSimWorkers(cfg) {
+    const workerUrl = new URL("./fastSimWorker.js", import.meta.url);
+    const workerCount = Math.min(cfg.workerCount, cfg.numMatches);
+    if (workerCount <= 0) return;
+    const storageSnapshot = snapshotLocalStorage();
+    const botPaths = [botAEl.value, botBEl.value].map(path => new URL(path, window.location.href).href);
+    const promises = [];
+    fastSimState.workers = [];
+    const baseMatches = Math.floor(cfg.numMatches / workerCount);
+    let remainder = cfg.numMatches - baseMatches * workerCount;
+    const baseSeed = Math.random() * 0xFFFFFFFF >>> 0;
+
+    for (let i = 0; i < workerCount; i++) {
+      const matches = baseMatches + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder--;
+      if (matches <= 0) continue;
+      const promise = new Promise((resolve, reject) => {
+        const worker = new Worker(workerUrl, { type: "module" });
+        fastSimState.workers.push(worker);
+        worker.onmessage = (event) => {
+          const data = event.data || {};
+          if (data.type === "match") {
+            if (!simRunning) return;
+            simStats.total++;
+            if (data.result === "A") simStats.aWins++;
+            else if (data.result === "B") simStats.bWins++;
+            else simStats.draws++;
+            updateSimResultsDisplay(cfg.numMatches);
+          } else if (data.type === "done") {
+            worker.terminate();
+            resolve();
+          } else if (data.type === "error") {
+            worker.terminate();
+            reject(new Error(data.message || "Worker error"));
+          }
+        };
+        worker.onerror = (err) => {
+          worker.terminate();
+          reject(err?.error || err);
+        };
+        worker.postMessage({
+          type: "run",
+          workerId: i,
+          matches,
+          speed: cfg.speed,
+          maxTime: cfg.maxTime,
+          randomizeSides: cfg.randomizeSides,
+          randomPreset: cfg.randomPreset,
+          presetId: cfg.presetId,
+          botPaths,
+          storageSnapshot,
+          randomSeed: (baseSeed + i * 977) >>> 0,
+        });
+      });
+      promises.push(promise);
+    }
+
+    await Promise.all(promises);
+  }
+
+  async function runFastSim() {
+    const numMatches = parseInt(simMatchesEl.value, 10) || 100;
+    const speed = Math.max(1, parseInt(simSpeedEl.value, 10) || 10);
+    const cfg = {
+      numMatches,
+      speed,
+      maxTime: FAST_SIM_MAX_TIME,
+      randomizeSides: getRandomizeSides(),
+      randomPreset: getProceduralMaps(),
+      presetId: getSelectedMapId(),
+    };
+
+    simRunning = true;
+    fastSimAbortRequested = false;
+    simStats = { aWins: 0, bWins: 0, draws: 0, total: 0 };
+    updateSimResultsDisplay(cfg.numMatches);
+    btnSimStart.disabled = true;
+    btnSimStop.disabled = false;
+
+    const workerSupport = typeof Worker !== "undefined";
+    const workerCount = workerSupport ? Math.max(1, Math.min(Bot3WorkerPool.computeWorkerCount() || 1, cfg.numMatches)) : 0;
+    let error = null;
+
+    try {
+      if (workerSupport && workerCount > 0) {
+        statusEl.textContent = `Running fast simulation (${workerCount} потоков)...`;
+        await runFastSimWorkers({ ...cfg, workerCount });
+      } else {
+        statusEl.textContent = "Running fast simulation (основной поток)...";
+        const selectedBots = await loadSelectedBots();
+        await runFastSimSequential(selectedBots, cfg);
+      }
+    } catch (err) {
+      error = err;
+      console.error(err);
+    } finally {
+      terminateFastSimWorkers();
+      simRunning = false;
+      btnSimStart.disabled = false;
+      btnSimStop.disabled = true;
+
+      if (error) {
+        statusEl.textContent = `Fast simulation error: ${error?.message || error}`;
+      } else if (fastSimAbortRequested) {
+        statusEl.textContent = "Fast simulation остановлен.";
+      } else {
+        statusEl.textContent = "Fast simulation complete.";
+      }
+
+      const total = Math.max(1, simStats.total || 1);
+      const aRate = ((simStats.aWins / total) * 100).toFixed(1);
+      const bRate = ((simStats.bWins / total) * 100).toFixed(1);
+      simResultsEl.textContent = `FINAL RESULTS\n\nMatches: ${simStats.total}\nA wins: ${simStats.aWins} (${aRate}%)\nB wins: ${simStats.bWins} (${bRate}%)\nDraws: ${simStats.draws}`;
+    }
   }
 
   btnSimStart.onclick = async () => {
-    stopRun(); // stop normal rendering
+    stopRun();
     await runFastSim();
   };
 
   btnSimStop.onclick = () => {
+    if (!simRunning) return;
+    fastSimAbortRequested = true;
     simRunning = false;
+    for (const worker of fastSimState.workers) {
+      try { worker.postMessage({ type: "abort" }); } catch (err) { console.warn("Failed to abort worker", err); }
+    }
   };
 
   // initial start

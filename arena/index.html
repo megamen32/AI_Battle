@@ -38,6 +38,17 @@
       <label style="margin-left:8px;">
         <input type="checkbox" id="proceduralMaps" /> Проц. карта
       </label>
+      <label style="margin-left:8px;">
+        Карта
+        <select id="mapSelect">
+          <option value="0">Карта 1</option>
+          <option value="1">Карта 2</option>
+          <option value="2">Карта 3</option>
+          <option value="3">Карта 4</option>
+          <option value="4">Карта 5</option>
+          <option value="random">Карта рандом</option>
+        </select>
+      </label>
       
       <label style="margin-left:12px;">Debug:
         <label><input type="checkbox" id="dbgRays" /> Rays</label>
@@ -85,10 +96,10 @@
          <button id="btnBot3Train">Начать обучение</button>
          <button id="btnBot3Reset" style="margin-left:6px;">Сбросить прогресс</button>
          <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-           <label>Steps/batch <input id="bot3Steps" type="number" min="256" max="8192" step="128" value="2048" /></label>
-           <label>Learning rate <input id="bot3Lr" type="number" step="0.0001" value="0.0005" /></label>
-           <label>Max match sec <input id="bot3MaxTime" type="number" min="10" max="180" step="5" value="90" /></label>
-           <label>Entropy coef <input id="bot3Entropy" type="number" step="0.0005" value="0.003" /></label>
+           <label title="Сколько шагов собираем перед обновлением веса. Больше — стабильнее, но дольше.">Steps/batch <input id="bot3Steps" type="number" min="256" max="8192" step="128" value="2048" /></label>
+           <label title="Скорость обучения PPO. Понижай, если reward скачет; повышай при стагнации.">Learning rate <input id="bot3Lr" type="number" step="0.0001" value="0.0005" /></label>
+           <label title="Ограничение длины матча в секундах. Меньше — больше эпизодов, больше — больше времени для сложных сценариев.">Max match sec <input id="bot3MaxTime" type="number" min="10" max="180" step="5" value="90" /></label>
+           <label title="Регулирует жадность политики. Высокое значение — больше экспериментов, низкое — стабильнее финальный стиль.">Entropy coef <input id="bot3Entropy" type="number" step="0.0005" value="0.003" /></label>
          </div>
          <canvas id="bot3Chart" width="280" height="110" style="width:100%; margin-top:8px; border:1px solid var(--stroke); border-radius:10px; background:rgba(0,0,0,0.15);"></canvas>
          <pre id="bot3Status" style="margin-top:6px;"></pre>
