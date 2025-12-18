@@ -30,13 +30,25 @@ const seedEl = document.getElementById("seed");
 const botAEl = document.getElementById("botA");
 const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
-const proceduralMapsEl = document.getElementById("proceduralMaps");
 const mapSelectEl = document.getElementById("mapSelect");
 const trainMapToggles = Array.from(document.querySelectorAll(".trainMapToggle"));
 const bot3StepsEl = document.getElementById("bot3Steps");
 const bot3LrEl = document.getElementById("bot3Lr");
 const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
 const bot3EntropyEl = document.getElementById("bot3Entropy");
+const bot3RewardNavEl = document.getElementById("bot3RewardNav");
+const bot3RewardDamageEl = document.getElementById("bot3RewardDamage");
+const bot3RewardTakenEl = document.getElementById("bot3RewardTaken");
+const bot3RewardSpeedEl = document.getElementById("bot3RewardSpeed");
+const bot3RewardForwardEl = document.getElementById("bot3RewardForward");
+const bot3RewardBackwardEl = document.getElementById("bot3RewardBackward");
+const bot3RewardFinishEl = document.getElementById("bot3RewardFinish");
+const bot3RewardKillEl = document.getElementById("bot3RewardKill");
+const bot3RewardWinEl = document.getElementById("bot3RewardWin");
+const bot3RewardDrawEl = document.getElementById("bot3RewardDraw");
+const bot3RewardTimeEl = document.getElementById("bot3RewardTime");
+const bot3RewardLoiterEl = document.getElementById("bot3RewardLoiter");
+const bot3RewardRadiusEl = document.getElementById("bot3RewardRadius");
 
 const stepsPerSecond = GAME_STEPS_PER_SECOND;
 const secondsToSteps = (seconds) => Math.round(seconds * stepsPerSecond);
@@ -204,6 +216,8 @@ async function boot() {
 
     let last = performance.now();
     let acc = 0;
+    let renderAcc = 0;
+    let forceRender = true;
 
     // ensure not paused at start
     paused = false;
@@ -213,15 +227,25 @@ async function boot() {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (!paused) acc += dt;
+      renderAcc += dt;
 
       // stop advancing the simulation as soon as we have a winner
+      let stepped = false;
       while (acc >= FIXED_DT) {
-        if (!paused && !game.winner) game.step(FIXED_DT);
+        if (!paused && !game.winner) {
+          game.step(FIXED_DT);
+          stepped = true;
+        }
         acc -= FIXED_DT;
       }
 
-      renderer.draw(game);
-      statusEl.textContent = game.debugText();
+      const shouldRender = forceRender || renderAcc >= FIXED_DT || stepped;
+      if (shouldRender) {
+        if (renderAcc >= FIXED_DT) renderAcc -= FIXED_DT;
+        forceRender = false;
+        renderer.draw(game);
+        statusEl.textContent = game.debugText();
+      }
 
       // if a winner appeared, pause the simulation to freeze final state
       if (game.winner !== null) {
@@ -384,7 +408,7 @@ async function boot() {
     entropyCoef: 0.003,
     valueCoef: 0.5,
     rewards: {
-      progress: 0.015,
+      navProgress: 0.02,
       damage: 0.04,
       damageTaken: 0.03,
       speed: 0.002,
@@ -394,7 +418,7 @@ async function boot() {
       killBonus: 1.2,
       winBonus: 2.0,
       drawBonus: 0.3,
-      timePenalty: 0.001,
+      timePenalty: 0.02,
       loiterPenalty: 0.08,
       loiterRadius: 260,
     },
@@ -404,6 +428,19 @@ async function boot() {
   if (bot3LrEl) bot3LrEl.value = BOT3_PPO_CONFIG.lr;
   if (bot3MaxTimeEl) bot3MaxTimeEl.value = stepsToRoundedSeconds(BOT3_PPO_CONFIG.maxMatchSteps);
   if (bot3EntropyEl) bot3EntropyEl.value = BOT3_PPO_CONFIG.entropyCoef;
+  if (bot3RewardNavEl) bot3RewardNavEl.value = BOT3_PPO_CONFIG.rewards.navProgress;
+  if (bot3RewardDamageEl) bot3RewardDamageEl.value = BOT3_PPO_CONFIG.rewards.damage;
+  if (bot3RewardTakenEl) bot3RewardTakenEl.value = BOT3_PPO_CONFIG.rewards.damageTaken;
+  if (bot3RewardSpeedEl) bot3RewardSpeedEl.value = BOT3_PPO_CONFIG.rewards.speed;
+  if (bot3RewardForwardEl) bot3RewardForwardEl.value = BOT3_PPO_CONFIG.rewards.forwardBonus;
+  if (bot3RewardBackwardEl) bot3RewardBackwardEl.value = BOT3_PPO_CONFIG.rewards.backwardPenalty;
+  if (bot3RewardFinishEl) bot3RewardFinishEl.value = BOT3_PPO_CONFIG.rewards.finishBonus;
+  if (bot3RewardKillEl) bot3RewardKillEl.value = BOT3_PPO_CONFIG.rewards.killBonus;
+  if (bot3RewardWinEl) bot3RewardWinEl.value = BOT3_PPO_CONFIG.rewards.winBonus;
+  if (bot3RewardDrawEl) bot3RewardDrawEl.value = BOT3_PPO_CONFIG.rewards.drawBonus;
+  if (bot3RewardTimeEl) bot3RewardTimeEl.value = BOT3_PPO_CONFIG.rewards.timePenalty;
+  if (bot3RewardLoiterEl) bot3RewardLoiterEl.value = BOT3_PPO_CONFIG.rewards.loiterPenalty;
+  if (bot3RewardRadiusEl) bot3RewardRadiusEl.value = BOT3_PPO_CONFIG.rewards.loiterRadius;
 
   function createTrainerConfig(overrides = {}) {
     const cfg = {
@@ -416,6 +453,13 @@ async function boot() {
     if (typeof overrides.entropyCoef === "number") cfg.entropyCoef = overrides.entropyCoef;
     if (typeof overrides.miniBatch === "number") cfg.miniBatch = overrides.miniBatch;
     if (typeof overrides.epochs === "number") cfg.epochs = overrides.epochs;
+    if (overrides.rewards && typeof overrides.rewards === "object") {
+      for (const [key, value] of Object.entries(overrides.rewards)) {
+        if (typeof value === "number" && key in cfg.rewards) {
+          cfg.rewards[key] = value;
+        }
+      }
+    }
     return cfg;
   }
 
@@ -445,11 +489,52 @@ async function boot() {
     return overrides;
   }
 
+  function readRewardOverrides() {
+    const overrides = {};
+    const clampNum = (val, min, max) => Math.min(max, Math.max(min, val));
+    const parse = (el, key, min = 0, max = Infinity) => {
+      if (!el) return;
+      const v = parseFloat(el.value);
+      if (!Number.isNaN(v)) overrides[key] = clampNum(v, min, max);
+    };
+    parse(bot3RewardNavEl, "navProgress");
+    parse(bot3RewardDamageEl, "damage");
+    parse(bot3RewardTakenEl, "damageTaken");
+    parse(bot3RewardSpeedEl, "speed");
+    parse(bot3RewardForwardEl, "forwardBonus");
+    parse(bot3RewardBackwardEl, "backwardPenalty");
+    parse(bot3RewardFinishEl, "finishBonus");
+    parse(bot3RewardKillEl, "killBonus");
+    parse(bot3RewardWinEl, "winBonus");
+    parse(bot3RewardDrawEl, "drawBonus");
+    parse(bot3RewardTimeEl, "timePenalty");
+    parse(bot3RewardLoiterEl, "loiterPenalty");
+    parse(bot3RewardRadiusEl, "loiterRadius");
+    return overrides;
+  }
+
   function setTrainingInputsDisabled(disabled) {
     if (bot3StepsEl) bot3StepsEl.disabled = disabled;
     if (bot3LrEl) bot3LrEl.disabled = disabled;
     if (bot3MaxTimeEl) bot3MaxTimeEl.disabled = disabled;
     if (bot3EntropyEl) bot3EntropyEl.disabled = disabled;
+    [
+      bot3RewardNavEl,
+      bot3RewardDamageEl,
+      bot3RewardTakenEl,
+      bot3RewardSpeedEl,
+      bot3RewardForwardEl,
+      bot3RewardBackwardEl,
+      bot3RewardFinishEl,
+      bot3RewardKillEl,
+      bot3RewardWinEl,
+      bot3RewardDrawEl,
+      bot3RewardTimeEl,
+      bot3RewardLoiterEl,
+      bot3RewardRadiusEl,
+    ].forEach(el => {
+      if (el) el.disabled = disabled;
+    });
     trainMapToggles.forEach(el => { el.disabled = disabled; });
   }
 
@@ -766,6 +851,7 @@ async function boot() {
       presetId: trainingMapSelection.presetPool[0] ?? 0,
     };
     const trainingOverrides = readTrainingOverrides();
+    const rewardOverrides = readRewardOverrides();
     const batchSteps = trainingOverrides.stepsPerBatch ?? BOT3_PPO_CONFIG.stepsPerBatch;
     const lrUsed = trainingOverrides.lr ?? BOT3_PPO_CONFIG.lr;
     const maxSec = stepsToRoundedSeconds(trainingOverrides.maxMatchSteps ?? BOT3_PPO_CONFIG.maxMatchSteps);
@@ -777,7 +863,7 @@ async function boot() {
       `Self-play запущен (стороны: ${trainingSettings.randomizeSides ? "менять" : "фикс"}, карта: ${mapLabel}, ` +
       `steps/batch: ${batchSteps}, lr: ${lrUsed}, T=${maxSec}s)`
     );
-    const trainer = new Bot3PPOTrainer(updateBot3Status, trainingSettings, trainingOverrides);
+    const trainer = new Bot3PPOTrainer(updateBot3Status, trainingSettings, { ...trainingOverrides, rewards: rewardOverrides });
     activeBot3Trainer = trainer;
     try {
       while (!bot3TrainAbort) {

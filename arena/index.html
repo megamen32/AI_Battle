@@ -100,15 +100,70 @@
          <div class="p">Экспериментальный бот с обучением. Прогресс сохраняется автоматически в браузере.</div>
          <button id="btnBot3Train">Начать обучение</button>
          <button id="btnBot3Reset" style="margin-left:6px;">Сбросить прогресс</button>
-         <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-           <label title="Сколько шагов собираем перед обновлением веса. Больше — стабильнее, но дольше.">Steps/batch <input id="bot3Steps" type="number" min="256" max="8192" step="128" value="2048" /></label>
-           <label title="Скорость обучения PPO. Понижай, если reward скачет; повышай при стагнации.">Learning rate <input id="bot3Lr" type="number" step="0.0001" value="0.0005" /></label>
-           <label title="Ограничение длины матча в секундах. Меньше — больше эпизодов, больше — больше времени для сложных сценариев.">Max match sec <input id="bot3MaxTime" type="number" min="10" max="180" step="5" value="90" /></label>
-           <label title="Регулирует жадность политики. Высокое значение — больше экспериментов, низкое — стабильнее финальный стиль.">Entropy coef <input id="bot3Entropy" type="number" step="0.0005" value="0.003" /></label>
-         </div>
-         <canvas id="bot3Chart" width="280" height="110" style="width:100%; margin-top:8px; border:1px solid var(--stroke); border-radius:10px; background:rgba(0,0,0,0.15);"></canvas>
-         <pre id="bot3Status" style="margin-top:6px;"></pre>
-       </div>
+         <details open style="margin-top:10px;">
+           <summary style="cursor:pointer;">Настройки обучения</summary>
+           <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
+             <label title="Сколько шагов собираем перед обновлением веса. Больше — стабильнее, но дольше.">
+               Steps/batch <input id="bot3Steps" type="number" min="256" max="8192" step="128" value="2048" />
+             </label>
+             <label title="Скорость обучения PPO. Понижай, если reward скачет; повышай при стагнации.">
+               Learning rate <input id="bot3Lr" type="number" step="0.0001" value="0.0005" />
+             </label>
+             <label title="Ограничение длины матча в секундах. Меньше — больше эпизодов, больше — больше времени для сложных сценариев.">
+               Max match sec <input id="bot3MaxTime" type="number" min="10" max="180" step="5" value="90" />
+             </label>
+             <label title="Регулирует жадность политики. Высокое значение — больше экспериментов, низкое — стабильнее финальный стиль.">
+               Entropy coef <input id="bot3Entropy" type="number" step="0.0005" value="0.003" />
+             </label>
+           </div>
+         </details>
+         <details style="margin-top:8px;">
+           <summary style="cursor:pointer;">Настройки награды</summary>
+           <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px; margin-top:8px;">
+             <label title="Награда за приближение к финишу вдоль навигационной карты.">
+               Nav progress <input id="bot3RewardNav" type="number" step="0.001" min="0" value="0.02" />
+             </label>
+             <label title="Награда за урон по врагу.">
+               Damage <input id="bot3RewardDamage" type="number" step="0.001" min="0" value="0.04" />
+             </label>
+             <label title="Штраф за получение урона.">
+               Damage taken <input id="bot3RewardTaken" type="number" step="0.001" min="0" value="0.03" />
+             </label>
+             <label title="Поощряет движение при прогрессе по финишу.">
+               Speed bonus <input id="bot3RewardSpeed" type="number" step="0.001" min="0" value="0.002" />
+             </label>
+             <label title="Дополнительная награда за движение в сторону финиша.">
+               Forward bonus <input id="bot3RewardForward" type="number" step="0.001" min="0" value="0.000" />
+             </label>
+             <label title="Наказание за движение в обратную сторону.">
+               Backward penalty <input id="bot3RewardBackward" type="number" step="0.001" min="0" value="0.000" />
+             </label>
+             <label title="Бонус за дорогу до финиша.">
+               Finish bonus <input id="bot3RewardFinish" type="number" step="0.1" min="0" value="1.5" />
+             </label>
+             <label title="Бонус за уничтожение врага.">
+               Kill bonus <input id="bot3RewardKill" type="number" step="0.1" min="0" value="1.2" />
+             </label>
+             <label title="Бонус за победу в матче.">
+               Win bonus <input id="bot3RewardWin" type="number" step="0.1" min="0" value="2.0" />
+             </label>
+             <label title="Награда за ничью.">
+               Draw bonus <input id="bot3RewardDraw" type="number" step="0.05" min="0" value="0.3" />
+             </label>
+             <label title="Штраф за каждый шаг (для борьбы с зацикливанием).">
+               Time penalty <input id="bot3RewardTime" type="number" step="0.005" min="0" value="0.02" />
+             </label>
+             <label title="Штраф, если машина застряла около финиша.">
+               Loiter penalty <input id="bot3RewardLoiter" type="number" step="0.01" min="0" value="0.08" />
+             </label>
+             <label title="Радиус, внутри которого действует штраф за стояние.">
+               Loiter radius <input id="bot3RewardRadius" type="number" step="5" min="0" value="260" />
+             </label>
+           </div>
+         </details>
+        <canvas id="bot3Chart" width="280" height="110" style="width:100%; margin-top:8px; border:1px solid var(--stroke); border-radius:10px; background:rgba(0,0,0,0.15);"></canvas>
+        <pre id="bot3Status" style="margin-top:6px;"></pre>
+      </div>
      </div>
    </div>  <script type="module" src="./main.js"></script>
 </body>

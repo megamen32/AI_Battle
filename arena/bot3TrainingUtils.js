@@ -170,8 +170,7 @@ export class Bot3ExperienceBuffer {
     this.pending = [null, null];
     this.trajectories = [[], []];
     this.finishBonusGiven = [false, false];
-    this.startPos = [null, null];
-    this.bestDistanceFromStart = [0, 0];
+    this.lastNavDistance = [Infinity, Infinity];
     this.lastEnemyHp = [null, null];
     this.lastMyHp = [null, null];
     this.stepCount = 0;
@@ -183,14 +182,12 @@ export class Bot3ExperienceBuffer {
   }
 
   bindGame(game) {
-    const center = game.world.finishCenter();
     this.pending[0] = null;
     this.pending[1] = null;
     for (let i = 0; i < 2; i++) {
       const car = game.cars[i];
       const enemy = game.cars[1 - i];
-      this.startPos[i] = { x: car.pos.x, y: car.pos.y };
-      this.bestDistanceFromStart[i] = 0;
+      this.lastNavDistance[i] = this.queryNavDistance(game.world, car.pos);
       this.lastEnemyHp[i] = enemy.hp;
       this.lastMyHp[i] = car.hp;
       this.finishBonusGiven[i] = false;
@@ -220,13 +217,13 @@ export class Bot3ExperienceBuffer {
     const enemy = game.cars[1 - carId];
     const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
     const finishDist = Math.hypot(finishVec.x, finishVec.y);
-    const start = this.startPos[carId] || { x: car.pos.x, y: car.pos.y };
-    const distFromStart = Math.hypot(car.pos.x - start.x, car.pos.y - start.y);
-    const prevBest = this.bestDistanceFromStart[carId] ?? 0;
-    const progress = Math.max(0, distFromStart - prevBest);
-    if (progress > 0) {
-      this.bestDistanceFromStart[carId] = distFromStart;
+    const navDist = this.queryNavDistance(game.world, car.pos);
+    const prevNavDist = Number.isFinite(this.lastNavDistance[carId]) ? this.lastNavDistance[carId] : navDist;
+    let progress = 0;
+    if (Number.isFinite(navDist) && Number.isFinite(prevNavDist)) {
+      progress = prevNavDist - navDist;
     }
+    this.lastNavDistance[carId] = Number.isFinite(navDist) ? navDist : prevNavDist;
 
     const prevEnemyHp = this.lastEnemyHp[carId] ?? enemy.hp;
     const enemyHpDelta = Math.max(0, prevEnemyHp - enemy.hp);
@@ -239,7 +236,7 @@ export class Bot3ExperienceBuffer {
     const velMag = Math.hypot(car.vel.x, car.vel.y);
     const speed = Math.min(1, velMag / 360);
 
-    let reward = progress * this.config.rewards.progress;
+    let reward = Math.max(0, progress) * this.config.rewards.navProgress;
     reward += enemyHpDelta * this.config.rewards.damage;
     reward -= myHpDelta * this.config.rewards.damageTaken;
     if (progress > 0) {
@@ -276,6 +273,21 @@ export class Bot3ExperienceBuffer {
     if (car.hp <= 0 && prevMyHp > 0) reward -= this.config.rewards.killBonus;
 
     return reward;
+  }
+
+  queryNavDistance(world, pos) {
+    const graph = world?.navGraph;
+    if (!graph) return Infinity;
+    const x = Math.min(Math.max(pos.x, 0), graph.worldWidth - 1);
+    const y = Math.min(Math.max(pos.y, 0), graph.worldHeight - 1);
+    const cx = Math.floor(x / graph.cellSize);
+    const cy = Math.floor(y / graph.cellSize);
+    const cols = graph.cols;
+    const rows = graph.rows;
+    if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return Infinity;
+    const idx = cy * cols + cx;
+    const dist = graph.distances[idx];
+    return Number.isFinite(dist) ? dist : Infinity;
   }
 
   afterStep(game) {

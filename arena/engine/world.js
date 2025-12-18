@@ -13,6 +13,8 @@ const PRESET_BUILDERS = [
   makePreset5,
 ];
 const DEFAULT_PRESET_POOL = PRESET_BUILDERS.map((_, idx) => idx);
+const NAV_CELL_SIZE = 64;
+const NAV_CACHE = new Map();
 
 function sanitizePool(pool) {
   if (!Array.isArray(pool) || !pool.length) return DEFAULT_PRESET_POOL.slice();
@@ -47,9 +49,31 @@ export function makeWorld(options = {}) {
     const choice = pool[Math.floor(rng() * pool.length)] ?? pool[0] ?? 0;
     presetIndex = choice;
   }
-  let world = PRESET_BUILDERS[presetIndex](seed);
-  world.presetId = presetIndex;
+
+  const startIdx = Math.max(0, Math.min(pool.length - 1, pool.indexOf(presetIndex)));
+  const candidateOrder = pool.length
+    ? pool.slice(startIdx).concat(pool.slice(0, startIdx))
+    : [presetIndex];
+
+  let world = null;
+  let selectedPreset = presetIndex;
+  for (const candidate of candidateOrder) {
+    const candidateWorld = PRESET_BUILDERS[candidate](seed);
+    if (isWorldPassable(candidateWorld)) {
+      world = candidateWorld;
+      selectedPreset = candidate;
+      break;
+    }
+  }
+  if (!world) {
+    selectedPreset = candidateOrder[0] ?? presetIndex;
+    world = PRESET_BUILDERS[selectedPreset](seed);
+    console.warn("[world] No passable preset found; falling back to preset", selectedPreset);
+  }
+
+  world.presetId = selectedPreset;
   world.availablePresets = pool.slice();
+  attachNavGraph(world, selectedPreset);
   if (swapSpawns && world.spawns.length >= 2) {
     world.spawns = [...world.spawns].reverse();
   }
@@ -63,6 +87,103 @@ function outerWalls() {
     { x: 0, y: 0, w: BORDER, h: WORLD_HEIGHT },
     //{ x: WORLD_WIDTH - BORDER, y: 0, w: BORDER, h: WORLD_HEIGHT },
   ];
+}
+
+const NAV_BLOCK_MARGIN = CAR_RADIUS + 8;
+
+function cellCenter(cx, cy) {
+  const size = NAV_CELL_SIZE;
+  return { x: cx * size + size / 2, y: cy * size + size / 2 };
+}
+
+function blockedPoint(world, point, margin = NAV_BLOCK_MARGIN) {
+  if (
+    point.x < BORDER + margin ||
+    point.x > WORLD_WIDTH - BORDER - margin ||
+    point.y < BORDER + margin ||
+    point.y > WORLD_HEIGHT - BORDER - margin
+  ) {
+    return true;
+  }
+  for (const wall of world.walls) {
+    if (
+      point.x >= wall.x - margin &&
+      point.x <= wall.x + wall.w + margin &&
+      point.y >= wall.y - margin &&
+      point.y <= wall.y + wall.h + margin
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function buildNavGraph(world) {
+  const cols = Math.ceil(WORLD_WIDTH / NAV_CELL_SIZE);
+  const rows = Math.ceil(WORLD_HEIGHT / NAV_CELL_SIZE);
+  const distances = new Float64Array(cols * rows);
+  distances.fill(Number.POSITIVE_INFINITY);
+  const queue = [];
+  const finish = world.finish;
+  const finishStartX = Math.floor(finish.x / NAV_CELL_SIZE);
+  const finishEndX = Math.floor((finish.x + finish.w) / NAV_CELL_SIZE);
+  const finishStartY = Math.floor(finish.y / NAV_CELL_SIZE);
+  const finishEndY = Math.floor((finish.y + finish.h) / NAV_CELL_SIZE);
+  for (let cx = finishStartX; cx <= finishEndX; cx++) {
+    for (let cy = finishStartY; cy <= finishEndY; cy++) {
+      if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) continue;
+      const center = cellCenter(cx, cy);
+      if (blockedPoint(world, center)) continue;
+      const idx = cy * cols + cx;
+      distances[idx] = 0;
+      queue.push({ cx, cy });
+    }
+  }
+
+  let qi = 0;
+  const deltas = [
+    { dx: 1, dy: 0 },
+    { dx: -1, dy: 0 },
+    { dx: 0, dy: 1 },
+    { dx: 0, dy: -1 },
+  ];
+  while (qi < queue.length) {
+    const current = queue[qi++];
+    const currentIdx = current.cy * cols + current.cx;
+    const currentDist = distances[currentIdx];
+    for (const delta of deltas) {
+      const nx = current.cx + delta.dx;
+      const ny = current.cy + delta.dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const center = cellCenter(nx, ny);
+      if (blockedPoint(world, center)) continue;
+      const nextIdx = ny * cols + nx;
+      const candidate = currentDist + NAV_CELL_SIZE;
+      if (candidate < distances[nextIdx]) {
+        distances[nextIdx] = candidate;
+        queue.push({ cx: nx, cy: ny });
+      }
+    }
+  }
+
+  return {
+    cols,
+    rows,
+    cellSize: NAV_CELL_SIZE,
+    distances,
+    worldWidth: WORLD_WIDTH,
+    worldHeight: WORLD_HEIGHT,
+  };
+}
+
+function attachNavGraph(world, presetIndex) {
+  if (NAV_CACHE.has(presetIndex)) {
+    world.navGraph = NAV_CACHE.get(presetIndex);
+  } else {
+    const graph = buildNavGraph(world);
+    NAV_CACHE.set(presetIndex, graph);
+    world.navGraph = graph;
+  }
 }
 
 function makePreset1() {
@@ -330,7 +451,6 @@ function isWorldPassable(world) {
   const cellSize = 80;
   const cols = Math.ceil(WORLD_WIDTH / cellSize);
   const rows = Math.ceil(WORLD_HEIGHT / cellSize);
-  const margin = CAR_RADIUS + 8;
 
   const start = world.spawns?.[0] || { x: BORDER * 2, y: BORDER * 2 };
   const finish = {
@@ -347,24 +467,9 @@ function isWorldPassable(world) {
     y: cy * cellSize + cellSize / 2,
   });
 
-  function blockedPoint(point) {
-    if (point.x < BORDER || point.x > WORLD_WIDTH - BORDER || point.y < BORDER || point.y > WORLD_HEIGHT - BORDER) return true;
-    for (const w of world.walls) {
-      if (
-        point.x >= w.x - margin &&
-        point.x <= w.x + w.w + margin &&
-        point.y >= w.y - margin &&
-        point.y <= w.y + w.h + margin
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   const startCell = toCell(start);
   const targetCell = toCell(finish);
-  if (blockedPoint(start) || blockedPoint(finish)) return false;
+  if (blockedPoint(world, start) || blockedPoint(world, finish)) return false;
 
   const visited = new Array(rows).fill(null).map(() => new Array(cols).fill(false));
   const queue = [];
@@ -372,7 +477,7 @@ function isWorldPassable(world) {
     if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return;
     if (visited[cy][cx]) return;
     const center = cellCenter(cx, cy);
-    if (blockedPoint(center)) return;
+    if (blockedPoint(world, center)) return;
     visited[cy][cx] = true;
     queue.push({ cx, cy });
   };
