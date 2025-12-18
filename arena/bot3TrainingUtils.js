@@ -170,7 +170,8 @@ export class Bot3ExperienceBuffer {
     this.pending = [null, null];
     this.trajectories = [[], []];
     this.finishBonusGiven = [false, false];
-    this.lastFinishDist = [null, null];
+    this.startPos = [null, null];
+    this.bestDistanceFromStart = [0, 0];
     this.lastEnemyHp = [null, null];
     this.lastMyHp = [null, null];
     this.stepCount = 0;
@@ -188,7 +189,8 @@ export class Bot3ExperienceBuffer {
     for (let i = 0; i < 2; i++) {
       const car = game.cars[i];
       const enemy = game.cars[1 - i];
-      this.lastFinishDist[i] = Math.hypot(car.pos.x - center.x, car.pos.y - center.y);
+      this.startPos[i] = { x: car.pos.x, y: car.pos.y };
+      this.bestDistanceFromStart[i] = 0;
       this.lastEnemyHp[i] = enemy.hp;
       this.lastMyHp[i] = car.hp;
       this.finishBonusGiven[i] = false;
@@ -218,9 +220,13 @@ export class Bot3ExperienceBuffer {
     const enemy = game.cars[1 - carId];
     const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
     const finishDist = Math.hypot(finishVec.x, finishVec.y);
-    const prevFinish = this.lastFinishDist[carId] ?? finishDist;
-    const progress = prevFinish - finishDist;
-    this.lastFinishDist[carId] = finishDist;
+    const start = this.startPos[carId] || { x: car.pos.x, y: car.pos.y };
+    const distFromStart = Math.hypot(car.pos.x - start.x, car.pos.y - start.y);
+    const prevBest = this.bestDistanceFromStart[carId] ?? 0;
+    const progress = Math.max(0, distFromStart - prevBest);
+    if (progress > 0) {
+      this.bestDistanceFromStart[carId] = distFromStart;
+    }
 
     const prevEnemyHp = this.lastEnemyHp[carId] ?? enemy.hp;
     const enemyHpDelta = Math.max(0, prevEnemyHp - enemy.hp);

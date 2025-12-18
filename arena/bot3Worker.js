@@ -4,7 +4,7 @@ import { Bot3ExperienceBuffer, cloneBrainToFloat } from "./bot3TrainingUtils.js"
 
 let workerId = null;
 let config = null;
-let settings = { randomizeSides: true, randomPreset: false, presetId: 0 };
+let settings = { randomizeSides: true, randomPreset: false, presetId: 0, presetPool: [0,1,2,3,4] };
 let brain = null;
 let abortRequested = false;
 
@@ -26,6 +26,7 @@ async function runMatch(buffer) {
     worldOptions: {
       randomPreset: settings.randomPreset,
       presetId: settings.presetId,
+      presetPool: settings.presetPool,
       swapSpawns,
     },
   });
@@ -59,7 +60,18 @@ self.onmessage = async (event) => {
     case "init": {
       workerId = data.workerId;
       config = data.config;
-      settings = data.settings || settings;
+      settings = {
+        ...settings,
+        ...(data.settings || {}),
+      };
+      if (!Array.isArray(settings.presetPool) || !settings.presetPool.length) {
+        settings.presetPool = [0,1,2,3,4];
+      } else {
+        settings.presetPool = settings.presetPool.map(v => Math.max(0, Math.min(4, Math.floor(v))));
+      }
+      if (!settings.presetPool.includes(settings.presetId)) {
+        settings.presetId = settings.presetPool[0] ?? 0;
+      }
       brain = cloneBrainToFloat(data.brain);
       abortRequested = false;
       postMessageSafe({ type: "ready", workerId });

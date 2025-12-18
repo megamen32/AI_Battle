@@ -36,9 +36,6 @@
         <input type="checkbox" id="randomizeSides" checked /> Менять стороны A/B
       </label>
       <label style="margin-left:8px;">
-        <input type="checkbox" id="proceduralMaps" /> Проц. карта
-      </label>
-      <label style="margin-left:8px;">
         Карта
         <select id="mapSelect">
           <option value="0">Карта 1</option>
@@ -75,6 +72,14 @@
          <div class="p">Turrets shoot both.</div>
          <div class="p">Bot API: decide(input) → { throttle, steer, shoot, aimAngle }</div>
        </div>
+        <div style="display:flex; flex-direction:column; gap:4px; margin-top:8px;">
+          <label><input type="checkbox" class="trainMapToggle" value="0" checked /> Карта 1</label>
+          <label><input type="checkbox" class="trainMapToggle" value="1" checked /> Карта 2</label>
+          <label><input type="checkbox" class="trainMapToggle" value="2" checked /> Карта 3</label>
+          <label><input type="checkbox" class="trainMapToggle" value="3" checked /> Карта 4</label>
+          <label><input type="checkbox" class="trainMapToggle" value="4" checked /> Карта 5</label>
+          <label><input type="checkbox" class="trainMapToggle" value="random" /> Карта рандом</label>
+        </div>
 
        <div class="panel">
          <div class="h">Fast Sim</div>

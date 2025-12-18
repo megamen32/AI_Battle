@@ -1,6 +1,6 @@
 import { Game } from "./engine/game.js";
 import { Renderer } from "./engine/render.js";
-import { GAME_STEP_DT } from "./constants.js";
+import { GAME_STEP_DT, GAME_STEPS_PER_SECOND } from "./constants.js";
 import {
   getBrain as getBot3Brain,
   setBrain as setBot3Brain,
@@ -32,10 +32,15 @@ const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
 const proceduralMapsEl = document.getElementById("proceduralMaps");
 const mapSelectEl = document.getElementById("mapSelect");
+const trainMapToggles = Array.from(document.querySelectorAll(".trainMapToggle"));
 const bot3StepsEl = document.getElementById("bot3Steps");
 const bot3LrEl = document.getElementById("bot3Lr");
 const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
 const bot3EntropyEl = document.getElementById("bot3Entropy");
+
+const stepsPerSecond = GAME_STEPS_PER_SECOND;
+const secondsToSteps = (seconds) => Math.round(seconds * stepsPerSecond);
+const stepsToRoundedSeconds = (steps) => Math.round(steps / stepsPerSecond);
 
 let paused = false;
 
@@ -53,12 +58,35 @@ async function loadBot(path, slot = "") {
 }
 
 async function boot() {
+  const ALL_PRESETS = [0,1,2,3,4];
   const getRandomizeSides = () => randomizeSidesEl?.checked ?? true;
-  const getProceduralMaps = () => proceduralMapsEl?.checked ?? false;
-  const getSelectedMapId = () => {
-    const val = parseInt(mapSelectEl?.value ?? "0", 10);
-    if (Number.isNaN(val)) return 0;
-    return Math.max(0, Math.min(4, val));
+  const getMapSelection = () => {
+    const raw = mapSelectEl?.value ?? "0";
+    if (raw === "random") return { presetId: 0, randomPreset: true, presetPool: ALL_PRESETS.slice() };
+    const val = parseInt(raw, 10);
+    if (Number.isNaN(val)) return { presetId: 0, randomPreset: false, presetPool: [0] };
+    const clamped = Math.max(0, Math.min(4, val));
+    return { presetId: clamped, randomPreset: false, presetPool: [clamped] };
+  };
+
+  function readTrainingMapSelection() {
+    const toggles = trainMapToggles.length ? trainMapToggles : null;
+    if (!toggles) return { randomPreset: true, presetPool: ALL_PRESETS.slice() };
+    const presets = [];
+    let includeRandom = false;
+    for (const toggle of toggles) {
+      if (!toggle.checked) continue;
+      if (toggle.value === "random") { includeRandom = true; continue; }
+      const id = parseInt(toggle.value, 10);
+      if (!Number.isNaN(id)) presets.push(Math.max(0, Math.min(4, id)));
+    }
+    if (!presets.length && !includeRandom) {
+      return { randomPreset: true, presetPool: ALL_PRESETS.slice() };
+    }
+    return {
+      randomPreset: includeRandom || presets.length > 1,
+      presetPool: presets.length ? presets : ALL_PRESETS.slice(),
+    };
   };
 
   async function loadSelectedBots() {
@@ -99,9 +127,11 @@ async function boot() {
     const ordered = orderBots(newSeed, selectedBots);
     const [bot0, bot1] = ordered.bots;
     const [name0, name1] = ordered.names;
+    const mapSelection = getMapSelection();
     const worldOptions = {
-      randomPreset: getProceduralMaps(),
-      presetId: getSelectedMapId(),
+      randomPreset: mapSelection.randomPreset,
+      presetId: mapSelection.presetId,
+      presetPool: mapSelection.presetPool,
     };
 
     // recreate game and renderer
@@ -344,7 +374,7 @@ async function boot() {
 
   const BOT3_PPO_CONFIG = {
     stepsPerBatch: 2048,
-    maxMatchSteps: 60 * 90,
+    maxMatchSteps: secondsToSteps(90),
     gamma: 0.995,
     lam: 0.95,
     clipRatio: 0.2,
@@ -372,7 +402,7 @@ async function boot() {
 
   if (bot3StepsEl) bot3StepsEl.value = BOT3_PPO_CONFIG.stepsPerBatch;
   if (bot3LrEl) bot3LrEl.value = BOT3_PPO_CONFIG.lr;
-  if (bot3MaxTimeEl) bot3MaxTimeEl.value = Math.round(BOT3_PPO_CONFIG.maxMatchSteps / 60);
+  if (bot3MaxTimeEl) bot3MaxTimeEl.value = stepsToRoundedSeconds(BOT3_PPO_CONFIG.maxMatchSteps);
   if (bot3EntropyEl) bot3EntropyEl.value = BOT3_PPO_CONFIG.entropyCoef;
 
   function createTrainerConfig(overrides = {}) {
@@ -402,7 +432,11 @@ async function boot() {
     }
     if (bot3MaxTimeEl) {
       const v = parseFloat(bot3MaxTimeEl.value);
-      if (!Number.isNaN(v)) overrides.maxMatchSteps = clampNum(Math.round(v * 60), 10 * 60, 180 * 60);
+      if (!Number.isNaN(v)) {
+        const minSteps = secondsToSteps(10);
+        const maxSteps = secondsToSteps(180);
+        overrides.maxMatchSteps = clampNum(secondsToSteps(v), minSteps, maxSteps);
+      }
     }
     if (bot3EntropyEl) {
       const v = parseFloat(bot3EntropyEl.value);
@@ -416,6 +450,7 @@ async function boot() {
     if (bot3LrEl) bot3LrEl.disabled = disabled;
     if (bot3MaxTimeEl) bot3MaxTimeEl.disabled = disabled;
     if (bot3EntropyEl) bot3EntropyEl.disabled = disabled;
+    trainMapToggles.forEach(el => { el.disabled = disabled; });
   }
 
 
@@ -574,7 +609,14 @@ async function boot() {
       this.optimizer = createAdamState(this.brain);
       this.iteration = 0;
       this.statusCb = statusCb;
-      this.settings = settings || { randomizeSides: true, proceduralMaps: false };
+      const presetPool = settings?.presetPool && settings.presetPool.length ? settings.presetPool : ALL_PRESETS.slice();
+      this.settings = {
+        randomizeSides: true,
+        randomPreset: false,
+        presetId: 0,
+        presetPool,
+        ...(settings || {}),
+      };
       this.workerPool = null;
     }
 
@@ -631,6 +673,7 @@ async function boot() {
         worldOptions: {
           randomPreset: this.settings.randomPreset,
           presetId: this.settings.presetId,
+          presetPool: this.settings.presetPool,
           swapSpawns,
         },
       });
@@ -715,16 +758,21 @@ async function boot() {
       if (btnSimStop) btnSimStop.disabled = true;
     }
 
+    const trainingMapSelection = readTrainingMapSelection();
     const trainingSettings = {
       randomizeSides: getRandomizeSides(),
-      randomPreset: getProceduralMaps(),
-      presetId: getSelectedMapId(),
+      randomPreset: trainingMapSelection.randomPreset,
+      presetPool: trainingMapSelection.presetPool,
+      presetId: trainingMapSelection.presetPool[0] ?? 0,
     };
     const trainingOverrides = readTrainingOverrides();
     const batchSteps = trainingOverrides.stepsPerBatch ?? BOT3_PPO_CONFIG.stepsPerBatch;
     const lrUsed = trainingOverrides.lr ?? BOT3_PPO_CONFIG.lr;
-    const maxSec = Math.round((trainingOverrides.maxMatchSteps ?? BOT3_PPO_CONFIG.maxMatchSteps) / 60);
-    const mapLabel = trainingSettings.randomPreset ? "случ. из 5" : `№${trainingSettings.presetId + 1}`;
+    const maxSec = stepsToRoundedSeconds(trainingOverrides.maxMatchSteps ?? BOT3_PPO_CONFIG.maxMatchSteps);
+    const mapPoolLabel = trainingSettings.presetPool.map(idx => `№${idx + 1}`).join(", ");
+    const mapLabel = trainingSettings.randomPreset
+      ? `микс ${mapPoolLabel || "рандом"}`
+      : `№${(trainingSettings.presetId ?? 0) + 1}`;
     updateBot3Status(
       `Self-play запущен (стороны: ${trainingSettings.randomizeSides ? "менять" : "фикс"}, карта: ${mapLabel}, ` +
       `steps/batch: ${batchSteps}, lr: ${lrUsed}, T=${maxSec}s)`
@@ -813,7 +861,7 @@ async function boot() {
   }
 
   async function runFastSimSequential(selectedBots, cfg) {
-    const maxSteps = cfg.maxTime * 60;
+    const maxSteps = secondsToSteps(cfg.maxTime);
     for (let m = 0; m < cfg.numMatches && simRunning; m++) {
       const seed = Math.random() * 0xFFFFFFFF >>> 0;
       const ordered = orderBots(seed, selectedBots);
@@ -824,6 +872,7 @@ async function boot() {
         worldOptions: {
           randomPreset: cfg.randomPreset,
           presetId: cfg.presetId,
+          presetPool: cfg.presetPool,
         },
       });
 
@@ -899,6 +948,7 @@ async function boot() {
           randomizeSides: cfg.randomizeSides,
           randomPreset: cfg.randomPreset,
           presetId: cfg.presetId,
+          presetPool: cfg.presetPool,
           botPaths,
           storageSnapshot,
           randomSeed: (baseSeed + i * 977) >>> 0,
@@ -913,13 +963,15 @@ async function boot() {
   async function runFastSim() {
     const numMatches = parseInt(simMatchesEl.value, 10) || 100;
     const speed = Math.max(1, parseInt(simSpeedEl.value, 10) || 10);
+    const mapSelection = getMapSelection();
     const cfg = {
       numMatches,
       speed,
       maxTime: FAST_SIM_MAX_TIME,
       randomizeSides: getRandomizeSides(),
-      randomPreset: getProceduralMaps(),
-      presetId: getSelectedMapId(),
+      randomPreset: mapSelection.randomPreset,
+      presetId: mapSelection.presetId,
+      presetPool: mapSelection.presetPool,
     };
 
     simRunning = true;

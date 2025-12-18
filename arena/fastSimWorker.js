@@ -1,10 +1,11 @@
 import { Game } from "./engine/game.js";
-import { GAME_STEP_DT } from "./constants.js";
+import { GAME_STEP_DT, GAME_STEPS_PER_SECOND } from "./constants.js";
 
 if (typeof self !== "undefined" && typeof self.window === "undefined") {
   self.window = self;
 }
 
+const DEFAULT_PRESET_POOL = [0,1,2,3,4];
 let abortRequested = false;
 let cachedBots = null;
 let cachedPaths = null;
@@ -73,10 +74,11 @@ function runSingleMatch(modules, cfg, matchIndex) {
     worldOptions: {
       randomPreset: cfg.randomPreset,
       presetId: cfg.presetId,
+      presetPool: cfg.presetPool,
     },
   });
 
-  const maxSteps = cfg.maxTime * 60;
+  const maxSteps = Math.round(cfg.maxTime * GAME_STEPS_PER_SECOND);
   for (let step = 0; step < maxSteps && !game.winner && !abortRequested; step++) {
     for (let s = 0; s < cfg.speed && !game.winner && !abortRequested; s++) {
       game.step(GAME_STEP_DT);
@@ -105,13 +107,17 @@ async function handleRun(config) {
 self.onmessage = (event) => {
   const data = event.data || {};
   if (data.type === "run") {
+    const pool = Array.isArray(data.presetPool) && data.presetPool.length
+      ? data.presetPool.map(v => Math.max(0, Math.min(4, Math.floor(v))))
+      : DEFAULT_PRESET_POOL.slice();
     handleRun({
       matches: Math.max(0, data.matches || 0),
       speed: Math.max(1, data.speed || 1),
       maxTime: Math.max(10, data.maxTime || 60),
       randomizeSides: !!data.randomizeSides,
       randomPreset: !!data.randomPreset,
-      presetId: Math.max(0, Math.min(4, Math.floor(data.presetId ?? 0))),
+      presetId: Math.max(0, Math.min(4, Math.floor(data.presetId ?? pool[0] ?? 0))),
+      presetPool: pool,
       botPaths: data.botPaths || [],
       storageSnapshot: data.storageSnapshot || [],
       workerId: data.workerId ?? 0,

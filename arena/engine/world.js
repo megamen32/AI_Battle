@@ -12,6 +12,21 @@ const PRESET_BUILDERS = [
   makePreset4,
   makePreset5,
 ];
+const DEFAULT_PRESET_POOL = PRESET_BUILDERS.map((_, idx) => idx);
+
+function sanitizePool(pool) {
+  if (!Array.isArray(pool) || !pool.length) return DEFAULT_PRESET_POOL.slice();
+  const seen = new Set();
+  const out = [];
+  for (const raw of pool) {
+    const val = Math.max(0, Math.min(PRESET_BUILDERS.length - 1, Math.floor(raw)));
+    if (!seen.has(val)) {
+      seen.add(val);
+      out.push(val);
+    }
+  }
+  return out.length ? out : DEFAULT_PRESET_POOL.slice();
+}
 
 export function makeWorld(options = {}) {
   const {
@@ -19,16 +34,22 @@ export function makeWorld(options = {}) {
     swapSpawns = false,
     presetId = 0,
     randomPreset = false,
+    presetPool = null,
   } = options;
 
+  const pool = sanitizePool(presetPool);
   let presetIndex = Math.max(0, Math.min(PRESET_BUILDERS.length - 1, Math.floor(presetId || 0)));
+  if (!randomPreset && !pool.includes(presetIndex)) {
+    presetIndex = pool[0] ?? 0;
+  }
   if (randomPreset) {
     const rng = typeof seed === "number" ? lcg(seed) : Math.random;
-    presetIndex = Math.floor(rng() * PRESET_BUILDERS.length);
+    const choice = pool[Math.floor(rng() * pool.length)] ?? pool[0] ?? 0;
+    presetIndex = choice;
   }
-
   let world = PRESET_BUILDERS[presetIndex](seed);
   world.presetId = presetIndex;
+  world.availablePresets = pool.slice();
   if (swapSpawns && world.spawns.length >= 2) {
     world.spawns = [...world.spawns].reverse();
   }
