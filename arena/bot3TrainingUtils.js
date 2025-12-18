@@ -7,7 +7,7 @@ import {
   gaussianEntropy as bot3GaussianEntropy,
   clamp,
 } from "./bots/bot3Policy.js";
-import { queryNavDistance } from "./engine/world.js";
+import { queryNavDistance,queryNavDistanceRobust } from "./engine/world.js";
 
 export function cloneBrainToFloat(source) {
   const brain = source;
@@ -190,7 +190,7 @@ export class Bot3ExperienceBuffer {
     for (let i = 0; i < 2; i++) {
       const car = game.cars[i];
       const enemy = game.cars[1 - i];
-      this.lastNavDistance[i] = queryNavDistance(game.world, car.pos);
+      this.lastNavDistance[i] = queryNavDistanceRobust(game.world, car.pos);
       this.lastEnemyHp[i] = enemy.hp;
       this.lastMyHp[i] = car.hp;
       this.finishBonusGiven[i] = false;
@@ -222,7 +222,7 @@ export class Bot3ExperienceBuffer {
     const enemy = game.cars[1 - carId];
     const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
     const finishDist = Math.hypot(finishVec.x, finishVec.y);
-    const navDist = queryNavDistance(game.world, car.pos);
+    const navDist = queryNavDistanceRobust(game.world, car.pos);
     const prevNavDist = Number.isFinite(this.lastNavDistance[carId]) ? this.lastNavDistance[carId] : navDist;
     const prevBest = this.bestNavDistance[carId];
     let progress = 0;

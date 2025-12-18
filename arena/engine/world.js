@@ -200,6 +200,45 @@ export function queryNavDistance(world, pos) {
   const dist = graph.distances[idx];
   return Number.isFinite(dist) ? dist : Infinity;
 }
+export function queryNavDistanceRobust(world, pos, r = 1) {
+  const g = world?.navGraph;
+  if (!g) return Infinity;
+
+  const { cellSize, cols, rows, distances, worldWidth, worldHeight } = g;
+
+  // клэмп один раз
+  const x = pos.x < 0 ? 0 : pos.x >= worldWidth ? worldWidth - 1 : pos.x;
+  const y = pos.y < 0 ? 0 : pos.y >= worldHeight ? worldHeight - 1 : pos.y;
+
+  const cx0 = (x / cellSize) | 0;
+  const cy0 = (y / cellSize) | 0;
+
+  const baseIdx = cy0 * cols + cx0;
+  let best = distances[baseIdx];
+
+  // если валидно — сразу выходим
+  if (best !== Infinity) return best;
+
+  // локальные границы
+  const minCx = Math.max(0, cx0 - r);
+  const maxCx = Math.min(cols - 1, cx0 + r);
+  const minCy = Math.max(0, cy0 - r);
+  const maxCy = Math.min(rows - 1, cy0 + r);
+
+  for (let cy = minCy; cy <= maxCy; cy++) {
+    let row = cy * cols;
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      if (cx === cx0 && cy === cy0) continue;
+
+      const d = distances[row + cx];
+      if (d < best) best = d;
+    }
+  }
+
+  return best;
+}
+
+
 
 function makePreset1() {
   const layoutWalls = [

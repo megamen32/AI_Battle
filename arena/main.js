@@ -31,7 +31,55 @@ const botAEl = document.getElementById("botA");
 const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
 const mapSelectEl = document.getElementById("mapSelect");
-const trainMapToggles = Array.from(document.querySelectorAll(".trainMapToggle"));
+	const trainMapToggles = Array.from(document.querySelectorAll(".trainMapToggle"));
+	const SETTINGS_STORAGE_KEY = "arena.settings-v1";
+
+	function loadStoredSettings() {
+		if (typeof localStorage === "undefined") return null;
+		const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+		if (!raw) return null;
+		try {
+			return JSON.parse(raw);
+		} catch (err) {
+			console.warn("Failed to parse stored settings", err);
+			return null;
+		}
+	}
+
+	function saveSettings(settings) {
+		if (!settings || typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+		} catch (err) {
+			console.warn("Failed to persist settings", err);
+		}
+	}
+
+	function applyTrainingMapToggles(settings) {
+		if (!settings || !("trainingMaps" in settings)) return;
+		const maps = settings.trainingMaps;
+		if (!Array.isArray(maps)) return;
+		const set = new Set(maps);
+		trainMapToggles.forEach((el) => {
+			el.checked = set.has(el.value);
+		});
+	}
+
+	function applyGeneralSettings(settings) {
+		if (!settings) return;
+		const run = settings.run || {};
+		if (botAEl && typeof run.botA === "string") botAEl.value = run.botA;
+		if (botBEl && typeof run.botB === "string") botBEl.value = run.botB;
+		if (randomizeSidesEl && typeof run.randomizeSides === "boolean") randomizeSidesEl.checked = run.randomizeSides;
+		if (mapSelectEl && typeof run.mapSelect === "string") {
+			const optionExists = Array.from(mapSelectEl.options).some((opt) => opt.value === run.mapSelect);
+			if (optionExists) mapSelectEl.value = run.mapSelect;
+		}
+		applyTrainingMapToggles(settings);
+	}
+
+	const storedSettings = loadStoredSettings();
+	applyGeneralSettings(storedSettings);
 const bot3StepsEl = document.getElementById("bot3Steps");
 const bot3LrEl = document.getElementById("bot3Lr");
 const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
@@ -292,6 +340,8 @@ async function boot() {
   const btnBot3Reset = document.getElementById('btnBot3Reset');
   const bot3StatusEl = document.getElementById('bot3Status');
   const bot3ChartEl = document.getElementById('bot3Chart');
+  const bot3AllTimeChartEl = document.getElementById('bot3ChartAllTime');
+  const botMLRewardEl = document.getElementById('botMLReward');
 
   loadBot3Brain();
 
@@ -302,39 +352,47 @@ async function boot() {
   }
 
   const bot3RewardHistory = [];
+  const bot3RewardHistoryAllTime = [];
   const BOT3_CHART_HISTORY = 120;
+  const BOT3_ALL_TIME_HISTORY_LIMIT = 2048;
   let bot3StatusMessage = "Мозг загружен и готов к обучению (PPO + self-play).";
 
-  function renderBot3Chart() {
-    if (!bot3ChartEl) return;
-    const ctx = bot3ChartEl.getContext('2d');
+  function drawRewardHistory(canvas, data, options = {}) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const w = bot3ChartEl.width;
-    const h = bot3ChartEl.height;
+    const {
+      lineColor = "#8bd5ff",
+      gridColor = "rgba(255,255,255,0.06)",
+      zeroLineColor = "rgba(255,255,255,0.1)",
+      emptyText = "Нет данных",
+    } = options;
+    const w = canvas.width;
+    const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "rgba(10,14,20,0.9)";
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.strokeStyle = gridColor;
     ctx.beginPath();
     ctx.moveTo(0, h / 2);
     ctx.lineTo(w, h / 2);
     ctx.stroke();
 
-    if (!bot3RewardHistory.length) {
+    if (!data.length) {
       ctx.fillStyle = "#7f8b99";
       ctx.font = "12px sans-serif";
-      ctx.fillText("Нет данных", 10, h / 2);
+      ctx.fillText(emptyText, 10, h / 2);
       return;
     }
 
-    const min = Math.min(...bot3RewardHistory);
-    const max = Math.max(...bot3RewardHistory);
+    const min = Math.min(...data);
+    const max = Math.max(...data);
     const range = Math.max(1e-3, max - min);
-    ctx.strokeStyle = "#8bd5ff";
+    ctx.strokeStyle = lineColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    bot3RewardHistory.forEach((val, idx) => {
-      const x = (idx / (bot3RewardHistory.length - 1 || 1)) * (w - 10) + 5;
+    data.forEach((val, idx) => {
+      const x = (idx / (data.length - 1 || 1)) * (w - 10) + 5;
       const norm = (val - min) / range;
       const y = h - norm * (h - 10) - 5;
       if (idx === 0) ctx.moveTo(x, y);
@@ -342,7 +400,7 @@ async function boot() {
     });
     ctx.stroke();
 
-    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.strokeStyle = zeroLineColor;
     ctx.setLineDash([4, 2]);
     ctx.beginPath();
     const zeroY = h - ((0 - min) / range) * (h - 10) - 5;
@@ -354,11 +412,60 @@ async function boot() {
     ctx.setLineDash([]);
   }
 
+  function renderBot3Chart() {
+    drawRewardHistory(bot3ChartEl, bot3RewardHistory);
+  }
+
+  function renderBot3AllTimeChart() {
+    drawRewardHistory(bot3AllTimeChartEl, bot3RewardHistoryAllTime, {
+      lineColor: "#8bff9b",
+      emptyText: "Нет долгой истории",
+    });
+  }
+
+  function isMLBotSelected() {
+    const mlPath = "./bots/botML.js";
+    return [botAEl, botBEl].some((el) => el?.value === mlPath);
+  }
+
+  function updateBotMLRewardDisplay() {
+    if (!botMLRewardEl) return;
+    const active = isMLBotSelected() && bot3RewardHistoryAllTime.length > 0;
+    if (!active) {
+      botMLRewardEl.style.display = "none";
+      return;
+    }
+    const last = bot3RewardHistoryAllTime[bot3RewardHistoryAllTime.length - 1];
+    if (!Number.isFinite(last)) {
+      botMLRewardEl.style.display = "none";
+      return;
+    }
+    botMLRewardEl.textContent = `ML reward: ${last.toFixed(3)}`;
+    botMLRewardEl.style.display = "";
+  }
+
+
+
   function pushBot3Reward(value) {
     bot3RewardHistory.push(value);
-    if (bot3RewardHistory.length > BOT3_CHART_HISTORY) bot3RewardHistory.shift();
+    if (bot3RewardHistory.length > BOT3_CHART_HISTORY) {
+      bot3RewardHistory.splice(0, bot3RewardHistory.length - BOT3_CHART_HISTORY);
+    }
+
+    bot3RewardHistoryAllTime.push(value);
+    if (bot3RewardHistoryAllTime.length > BOT3_ALL_TIME_HISTORY_LIMIT) {
+      bot3RewardHistoryAllTime.splice(
+        0,
+        bot3RewardHistoryAllTime.length - BOT3_ALL_TIME_HISTORY_LIMIT
+      );
+    }
+
     renderBot3Chart();
+    renderBot3AllTimeChart();
+    updateBotMLRewardDisplay();
   }
+
+
 
   function updateBot3Status(text) {
     if (!bot3StatusEl) return;
@@ -370,12 +477,15 @@ async function boot() {
 
   updateBot3Status(bot3StatusMessage);
   renderBot3Chart();
+  renderBot3AllTimeChart();
 
   if (btnBot3Reset) {
     btnBot3Reset.onclick = () => {
       resetBot3Brain();
       bot3RewardHistory.length = 0;
+      bot3RewardHistoryAllTime.length = 0;
       renderBot3Chart();
+      renderBot3AllTimeChart();
       updateBot3Status("Прогресс сброшен. Модель возвращена к значениям по умолчанию.");
     };
   }
@@ -432,6 +542,71 @@ async function boot() {
   const rewardFieldMap = new Map(rewardFieldDefinitions.map((field) => [field.key, field]));
   const rewardInputs = new Map();
 
+  function applyTrainingInputs(settings) {
+    if (!settings?.training) return;
+    const training = settings.training;
+    if (bot3StepsEl && Number.isFinite(training.stepsPerBatch)) bot3StepsEl.value = String(training.stepsPerBatch);
+    if (bot3LrEl && Number.isFinite(training.lr)) bot3LrEl.value = String(training.lr);
+    if (bot3MaxTimeEl && Number.isFinite(training.maxMatchSec)) bot3MaxTimeEl.value = String(training.maxMatchSec);
+    if (bot3EntropyEl && Number.isFinite(training.entropyCoef)) bot3EntropyEl.value = String(training.entropyCoef);
+  }
+
+  function applyRewardSettings(settings) {
+    if (!settings?.rewards) return;
+    const rewards = settings.rewards;
+    rewardInputs.forEach((input, key) => {
+      if (Object.prototype.hasOwnProperty.call(rewards, key)) {
+        const value = rewards[key];
+        if (Number.isFinite(value)) input.value = String(value);
+      }
+    });
+  }
+
+  function collectCurrentSettings() {
+    const run = {
+      botA: botAEl?.value ?? "",
+      botB: botBEl?.value ?? "",
+      randomizeSides: randomizeSidesEl?.checked ?? false,
+      mapSelect: mapSelectEl?.value ?? "",
+    };
+    const training = {};
+    if (bot3StepsEl) {
+      const steps = parseInt(bot3StepsEl.value, 10);
+      if (!Number.isNaN(steps)) training.stepsPerBatch = steps;
+    }
+    if (bot3LrEl) {
+      const lr = parseFloat(bot3LrEl.value);
+      if (!Number.isNaN(lr)) training.lr = lr;
+    }
+    if (bot3MaxTimeEl) {
+      const secs = parseFloat(bot3MaxTimeEl.value);
+      if (!Number.isNaN(secs)) training.maxMatchSec = secs;
+    }
+    if (bot3EntropyEl) {
+      const ent = parseFloat(bot3EntropyEl.value);
+      if (!Number.isNaN(ent)) training.entropyCoef = ent;
+    }
+
+    const rewards = {};
+    rewardInputs.forEach((input, key) => {
+      const value = parseFloat(input.value);
+      if (!Number.isNaN(value)) rewards[key] = value;
+    });
+
+    const trainingMaps = trainMapToggles.filter((el) => el.checked).map((el) => el.value);
+
+    return {
+      run,
+      training,
+      rewards,
+      trainingMaps,
+    };
+  }
+
+  function persistSettings() {
+    saveSettings(collectCurrentSettings());
+  }
+
   function buildRewardFields() {
     if (!bot3RewardFieldsEl) return;
     bot3RewardFieldsEl.innerHTML = "";
@@ -457,11 +632,32 @@ async function boot() {
   }
 
   buildRewardFields();
+  applyRewardSettings(storedSettings);
 
   if (bot3StepsEl) bot3StepsEl.value = BOT3_PPO_CONFIG.stepsPerBatch;
   if (bot3LrEl) bot3LrEl.value = BOT3_PPO_CONFIG.lr;
   if (bot3MaxTimeEl) bot3MaxTimeEl.value = stepsToRoundedSeconds(BOT3_PPO_CONFIG.maxMatchSteps);
   if (bot3EntropyEl) bot3EntropyEl.value = BOT3_PPO_CONFIG.entropyCoef;
+  applyTrainingInputs(storedSettings);
+
+  const generalSettingsControls = [botAEl, botBEl, randomizeSidesEl, mapSelectEl];
+  generalSettingsControls.forEach((el) => {
+    if (el) {
+      el.addEventListener("change", () => {
+        persistSettings();
+        updateBotMLRewardDisplay();
+      });
+    }
+  });
+  trainMapToggles.forEach((el) => el.addEventListener("change", persistSettings));
+  [bot3StepsEl, bot3LrEl, bot3MaxTimeEl, bot3EntropyEl].forEach((el) => {
+    if (el) el.addEventListener("input", persistSettings);
+  });
+  rewardInputs.forEach((input) => {
+    input.addEventListener("input", persistSettings);
+  });
+  persistSettings();
+  updateBotMLRewardDisplay();
 
   function createTrainerConfig(overrides = {}) {
     const cfg = {
