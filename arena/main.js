@@ -36,19 +36,7 @@ const bot3StepsEl = document.getElementById("bot3Steps");
 const bot3LrEl = document.getElementById("bot3Lr");
 const bot3MaxTimeEl = document.getElementById("bot3MaxTime");
 const bot3EntropyEl = document.getElementById("bot3Entropy");
-const bot3RewardNavEl = document.getElementById("bot3RewardNav");
-const bot3RewardDamageEl = document.getElementById("bot3RewardDamage");
-const bot3RewardTakenEl = document.getElementById("bot3RewardTaken");
-const bot3RewardSpeedEl = document.getElementById("bot3RewardSpeed");
-const bot3RewardForwardEl = document.getElementById("bot3RewardForward");
-const bot3RewardBackwardEl = document.getElementById("bot3RewardBackward");
-const bot3RewardFinishEl = document.getElementById("bot3RewardFinish");
-const bot3RewardKillEl = document.getElementById("bot3RewardKill");
-const bot3RewardWinEl = document.getElementById("bot3RewardWin");
-const bot3RewardDrawEl = document.getElementById("bot3RewardDraw");
-const bot3RewardTimeEl = document.getElementById("bot3RewardTime");
-const bot3RewardLoiterEl = document.getElementById("bot3RewardLoiter");
-const bot3RewardRadiusEl = document.getElementById("bot3RewardRadius");
+const bot3RewardFieldsEl = document.getElementById("bot3RewardFields");
 
 const stepsPerSecond = GAME_STEPS_PER_SECOND;
 const secondsToSteps = (seconds) => Math.round(seconds * stepsPerSecond);
@@ -421,26 +409,59 @@ async function boot() {
       timePenalty: 0.02,
       loiterPenalty: 0.08,
       loiterRadius: 260,
+      infNavPenalty: 0.5,
     },
   };
+
+  const rewardFieldDefinitions = [
+    { key: "navProgress", label: "Nav progress", tooltip: "Награда за приближение к финишу по навиграфу.", step: 0.001, min: 0 },
+    { key: "damage", label: "Damage", tooltip: "Награда за урон по врагу.", step: 0.001, min: 0 },
+    { key: "damageTaken", label: "Damage taken", tooltip: "Штраф за получение урона.", step: 0.001, min: 0 },
+    { key: "speed", label: "Speed bonus", tooltip: "Поощряет движение при прогрессе к финишу.", step: 0.001, min: 0 },
+    { key: "forwardBonus", label: "Forward bonus", tooltip: "Дополнительная награда за движение в направлении финиша.", step: 0.001, min: 0 },
+    { key: "backwardPenalty", label: "Backward penalty", tooltip: "Штраф за движение обратно.", step: 0.001, min: 0 },
+    { key: "finishBonus", label: "Finish bonus", tooltip: "Бонус за достижение финиша.", step: 0.1, min: 0 },
+    { key: "killBonus", label: "Kill bonus", tooltip: "Бонус за уничтожение врага.", step: 0.1, min: 0 },
+    { key: "winBonus", label: "Win bonus", tooltip: "Бонус за победу в матче.", step: 0.1, min: 0 },
+    { key: "drawBonus", label: "Draw bonus", tooltip: "Награда за ничью.", step: 0.05, min: 0 },
+    { key: "timePenalty", label: "Time penalty", tooltip: "Штраф за каждый шаг.", step: 0.005, min: 0 },
+    { key: "loiterPenalty", label: "Loiter penalty", tooltip: "Штраф, если машина застряла около финиша.", step: 0.01, min: 0 },
+    { key: "loiterRadius", label: "Loiter radius", tooltip: "Радиус действия штрафа за стояние.", step: 5, min: 0 },
+    { key: "infNavPenalty", label: "Inf nav penalty", tooltip: "Штраф за уход в недостижимые зоны (навиграф не видит финиш).", step: 0.1, min: 0 },
+  ];
+  const rewardFieldMap = new Map(rewardFieldDefinitions.map((field) => [field.key, field]));
+  const rewardInputs = new Map();
+
+  function buildRewardFields() {
+    if (!bot3RewardFieldsEl) return;
+    bot3RewardFieldsEl.innerHTML = "";
+    rewardInputs.clear();
+    rewardFieldDefinitions.forEach((field) => {
+      const label = document.createElement("label");
+      label.title = field.tooltip;
+      label.style.display = "flex";
+      label.style.alignItems = "center";
+      label.style.justifyContent = "space-between";
+      label.style.gap = "8px";
+      const input = document.createElement("input");
+      input.type = "number";
+      if (field.step !== undefined) input.step = String(field.step);
+      if (field.min !== undefined) input.min = String(field.min);
+      if (field.max !== undefined) input.max = String(field.max);
+      const defaultValue = BOT3_PPO_CONFIG.rewards[field.key];
+      input.value = Number.isFinite(defaultValue) ? String(defaultValue) : "0";
+      label.append(document.createTextNode(field.label), input);
+      bot3RewardFieldsEl.appendChild(label);
+      rewardInputs.set(field.key, input);
+    });
+  }
+
+  buildRewardFields();
 
   if (bot3StepsEl) bot3StepsEl.value = BOT3_PPO_CONFIG.stepsPerBatch;
   if (bot3LrEl) bot3LrEl.value = BOT3_PPO_CONFIG.lr;
   if (bot3MaxTimeEl) bot3MaxTimeEl.value = stepsToRoundedSeconds(BOT3_PPO_CONFIG.maxMatchSteps);
   if (bot3EntropyEl) bot3EntropyEl.value = BOT3_PPO_CONFIG.entropyCoef;
-  if (bot3RewardNavEl) bot3RewardNavEl.value = BOT3_PPO_CONFIG.rewards.navProgress;
-  if (bot3RewardDamageEl) bot3RewardDamageEl.value = BOT3_PPO_CONFIG.rewards.damage;
-  if (bot3RewardTakenEl) bot3RewardTakenEl.value = BOT3_PPO_CONFIG.rewards.damageTaken;
-  if (bot3RewardSpeedEl) bot3RewardSpeedEl.value = BOT3_PPO_CONFIG.rewards.speed;
-  if (bot3RewardForwardEl) bot3RewardForwardEl.value = BOT3_PPO_CONFIG.rewards.forwardBonus;
-  if (bot3RewardBackwardEl) bot3RewardBackwardEl.value = BOT3_PPO_CONFIG.rewards.backwardPenalty;
-  if (bot3RewardFinishEl) bot3RewardFinishEl.value = BOT3_PPO_CONFIG.rewards.finishBonus;
-  if (bot3RewardKillEl) bot3RewardKillEl.value = BOT3_PPO_CONFIG.rewards.killBonus;
-  if (bot3RewardWinEl) bot3RewardWinEl.value = BOT3_PPO_CONFIG.rewards.winBonus;
-  if (bot3RewardDrawEl) bot3RewardDrawEl.value = BOT3_PPO_CONFIG.rewards.drawBonus;
-  if (bot3RewardTimeEl) bot3RewardTimeEl.value = BOT3_PPO_CONFIG.rewards.timePenalty;
-  if (bot3RewardLoiterEl) bot3RewardLoiterEl.value = BOT3_PPO_CONFIG.rewards.loiterPenalty;
-  if (bot3RewardRadiusEl) bot3RewardRadiusEl.value = BOT3_PPO_CONFIG.rewards.loiterRadius;
 
   function createTrainerConfig(overrides = {}) {
     const cfg = {
@@ -492,24 +513,13 @@ async function boot() {
   function readRewardOverrides() {
     const overrides = {};
     const clampNum = (val, min, max) => Math.min(max, Math.max(min, val));
-    const parse = (el, key, min = 0, max = Infinity) => {
-      if (!el) return;
-      const v = parseFloat(el.value);
+    rewardInputs.forEach((input, key) => {
+      const field = rewardFieldMap.get(key);
+      const min = field?.min ?? -Infinity;
+      const max = field?.max ?? Infinity;
+      const v = parseFloat(input.value);
       if (!Number.isNaN(v)) overrides[key] = clampNum(v, min, max);
-    };
-    parse(bot3RewardNavEl, "navProgress");
-    parse(bot3RewardDamageEl, "damage");
-    parse(bot3RewardTakenEl, "damageTaken");
-    parse(bot3RewardSpeedEl, "speed");
-    parse(bot3RewardForwardEl, "forwardBonus");
-    parse(bot3RewardBackwardEl, "backwardPenalty");
-    parse(bot3RewardFinishEl, "finishBonus");
-    parse(bot3RewardKillEl, "killBonus");
-    parse(bot3RewardWinEl, "winBonus");
-    parse(bot3RewardDrawEl, "drawBonus");
-    parse(bot3RewardTimeEl, "timePenalty");
-    parse(bot3RewardLoiterEl, "loiterPenalty");
-    parse(bot3RewardRadiusEl, "loiterRadius");
+    });
     return overrides;
   }
 
@@ -518,22 +528,8 @@ async function boot() {
     if (bot3LrEl) bot3LrEl.disabled = disabled;
     if (bot3MaxTimeEl) bot3MaxTimeEl.disabled = disabled;
     if (bot3EntropyEl) bot3EntropyEl.disabled = disabled;
-    [
-      bot3RewardNavEl,
-      bot3RewardDamageEl,
-      bot3RewardTakenEl,
-      bot3RewardSpeedEl,
-      bot3RewardForwardEl,
-      bot3RewardBackwardEl,
-      bot3RewardFinishEl,
-      bot3RewardKillEl,
-      bot3RewardWinEl,
-      bot3RewardDrawEl,
-      bot3RewardTimeEl,
-      bot3RewardLoiterEl,
-      bot3RewardRadiusEl,
-    ].forEach(el => {
-      if (el) el.disabled = disabled;
+    rewardInputs.forEach((input) => {
+      input.disabled = disabled;
     });
     trainMapToggles.forEach(el => { el.disabled = disabled; });
   }

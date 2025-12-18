@@ -1,4 +1,5 @@
 import { len, sub, rot, add, mul } from "./math.js";
+import { queryNavDistance } from "./world.js";
 
 export class Renderer {
   constructor(canvas) {
@@ -21,11 +22,11 @@ export class Renderer {
     // auto follow settings
     this.autoFollow = true;
     this.minZoom = 0.5;
-    this.maxZoom = 10;
+    this.maxZoom = 20;
     this._smooth = 0.12; // camera smoothing factor (0..1)
     this.autoZoomBias = 1;
-    this.autoZoomBiasMin = 0.1;
-    this.autoZoomBiasMax = 10.5;
+    this.autoZoomBiasMin = 1.0;
+    this.autoZoomBiasMax = 20.5;
   }
 
   // Convert canvas coordinates to world coordinates
@@ -101,7 +102,8 @@ export class Renderer {
     const worldRight = this.camera.x + (w / this.camera.zoom);
     const worldBottom = this.camera.y + (h / this.camera.zoom);
 
-    const gridSize = 40;
+    const navGraph = game?.world?.navGraph;
+    const gridSize = Number.isFinite(navGraph?.cellSize) ? navGraph.cellSize : 32;
     ctx.beginPath();
     // vertical lines
     let sx = Math.floor(worldLeft / gridSize) * gridSize;
@@ -237,19 +239,22 @@ export class Renderer {
             }
           }
 
-          if (this.debug.info) {
-            // draw car debug box
-            const infoX = car.pos.x + 18;
-            const infoY = car.pos.y - 22;
-            ctx.fillStyle = 'rgba(0,0,0,0.6)';
-            ctx.fillRect(infoX, infoY, 140, 44);
-            ctx.fillStyle = 'rgba(220,230,240,0.95)';
-            ctx.font = '11px ui-sans-serif';
-            const speed = Math.round(len(car.vel));
-            ctx.fillText(`${car.name} id=${car.id}`, infoX + 6, infoY + 12);
-            ctx.fillText(`hp=${Math.round(car.hp)} sp=${speed}`, infoX + 6, infoY + 26);
-            ctx.fillText(`pos=${Math.round(car.pos.x)},${Math.round(car.pos.y)}`, infoX + 6, infoY + 40);
-          }
+        if (this.debug.info) {
+          // draw car debug box
+          const infoX = car.pos.x + 18;
+          const infoY = car.pos.y - 22;
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(infoX, infoY, 140, 64);
+          ctx.fillStyle = 'rgba(220,230,240,0.95)';
+          ctx.font = '11px ui-sans-serif';
+          const speed = Math.round(len(car.vel));
+          ctx.fillText(`${car.name} id=${car.id}`, infoX + 6, infoY + 12);
+          ctx.fillText(`hp=${Math.round(car.hp)} sp=${speed}`, infoX + 6, infoY + 26);
+          ctx.fillText(`pos=${Math.round(car.pos.x)},${Math.round(car.pos.y)}`, infoX + 6, infoY + 40);
+          const navDist = queryNavDistance(game.world, car.pos);
+          const navLabel = Number.isFinite(navDist) ? `${Math.round(navDist)}` : 'inf';
+          ctx.fillText(`nav=${navLabel}`, infoX + 6, infoY + 54);
+        }
         } catch (e) {
           // makeInputFor could throw for dead cars; ignore
         }

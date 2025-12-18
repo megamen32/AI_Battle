@@ -1,6 +1,6 @@
 import { lcg } from "./math.js";
 
-const WORLD_WIDTH = 4000;
+const WORLD_WIDTH = 4500;
 const WORLD_HEIGHT = 2500;
 const BORDER = 40;
 const CAR_RADIUS = 14;
@@ -13,7 +13,7 @@ const PRESET_BUILDERS = [
   makePreset5,
 ];
 const DEFAULT_PRESET_POOL = PRESET_BUILDERS.map((_, idx) => idx);
-const NAV_CELL_SIZE = 64;
+const NAV_CELL_SIZE = 32;
 const NAV_CACHE = new Map();
 
 function sanitizePool(pool) {
@@ -85,7 +85,7 @@ function outerWalls() {
     { x: 0, y: 0, w: WORLD_WIDTH, h: BORDER },
     { x: 0, y: WORLD_HEIGHT - BORDER, w: WORLD_WIDTH, h: BORDER },
     { x: 0, y: 0, w: BORDER, h: WORLD_HEIGHT },
-    //{ x: WORLD_WIDTH - BORDER, y: 0, w: BORDER, h: WORLD_HEIGHT },
+    { x: WORLD_WIDTH - BORDER, y: 0, w: BORDER, h: WORLD_HEIGHT },
   ];
 }
 
@@ -184,6 +184,21 @@ function attachNavGraph(world, presetIndex) {
     NAV_CACHE.set(presetIndex, graph);
     world.navGraph = graph;
   }
+}
+
+export function queryNavDistance(world, pos) {
+  const graph = world?.navGraph;
+  if (!graph) return Infinity;
+  const x = Math.min(Math.max(pos.x, 0), graph.worldWidth - 1);
+  const y = Math.min(Math.max(pos.y, 0), graph.worldHeight - 1);
+  const cx = Math.floor(x / graph.cellSize);
+  const cy = Math.floor(y / graph.cellSize);
+  const cols = graph.cols;
+  const rows = graph.rows;
+  if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return Infinity;
+  const idx = cy * cols + cx;
+  const dist = graph.distances[idx];
+  return Number.isFinite(dist) ? dist : Infinity;
 }
 
 function makePreset1() {
@@ -448,49 +463,18 @@ function makePreset5() {
 }
 
 function isWorldPassable(world) {
-  const cellSize = 80;
-  const cols = Math.ceil(WORLD_WIDTH / cellSize);
-  const rows = Math.ceil(WORLD_HEIGHT / cellSize);
+  const graph = buildNavGraph(world);
 
-  const start = world.spawns?.[0] || { x: BORDER * 2, y: BORDER * 2 };
-  const finish = {
-    x: world.finish.x + world.finish.w / 2,
-    y: world.finish.y + world.finish.h / 2,
-  };
-
-  const toCell = (p) => ({
-    cx: Math.floor(Math.min(Math.max(p.x, 0), WORLD_WIDTH - 1) / cellSize),
-    cy: Math.floor(Math.min(Math.max(p.y, 0), WORLD_HEIGHT - 1) / cellSize),
-  });
-  const cellCenter = (cx, cy) => ({
-    x: cx * cellSize + cellSize / 2,
-    y: cy * cellSize + cellSize / 2,
-  });
-
-  const startCell = toCell(start);
-  const targetCell = toCell(finish);
-  if (blockedPoint(world, start) || blockedPoint(world, finish)) return false;
-
-  const visited = new Array(rows).fill(null).map(() => new Array(cols).fill(false));
-  const queue = [];
-  const pushCell = (cx, cy) => {
-    if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return;
-    if (visited[cy][cx]) return;
-    const center = cellCenter(cx, cy);
-    if (blockedPoint(world, center)) return;
-    visited[cy][cx] = true;
-    queue.push({ cx, cy });
-  };
-
-  pushCell(startCell.cx, startCell.cy);
-
-  while (queue.length) {
-    const { cx, cy } = queue.shift();
-    if (Math.abs(cx - targetCell.cx) <= 1 && Math.abs(cy - targetCell.cy) <= 1) return true;
-    pushCell(cx + 1, cy);
-    pushCell(cx - 1, cy);
-    pushCell(cx, cy + 1);
-    pushCell(cx, cy - 1);
+  // Проверяем, что хотя бы одна стартовая клетка имеет конечную дистанцию
+  for (const spawn of world.spawns) {
+    const d = queryNavDistance(
+      { navGraph: graph },
+      { x: spawn.x, y: spawn.y }
+    );
+    if (Number.isFinite(d)) {
+      return true;
+    }
   }
   return false;
 }
+

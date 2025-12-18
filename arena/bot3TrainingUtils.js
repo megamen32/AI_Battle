@@ -5,7 +5,9 @@ import {
   evaluatePolicy as evalBot3Policy,
   logProbFromEval as bot3LogProb,
   gaussianEntropy as bot3GaussianEntropy,
+  clamp,
 } from "./bots/bot3Policy.js";
+import { queryNavDistance } from "./engine/world.js";
 
 export function cloneBrainToFloat(source) {
   const brain = source;
@@ -171,6 +173,7 @@ export class Bot3ExperienceBuffer {
     this.trajectories = [[], []];
     this.finishBonusGiven = [false, false];
     this.lastNavDistance = [Infinity, Infinity];
+    this.bestNavDistance = [Infinity, Infinity];
     this.lastEnemyHp = [null, null];
     this.lastMyHp = [null, null];
     this.stepCount = 0;
@@ -187,11 +190,13 @@ export class Bot3ExperienceBuffer {
     for (let i = 0; i < 2; i++) {
       const car = game.cars[i];
       const enemy = game.cars[1 - i];
-      this.lastNavDistance[i] = this.queryNavDistance(game.world, car.pos);
+      this.lastNavDistance[i] = queryNavDistance(game.world, car.pos);
       this.lastEnemyHp[i] = enemy.hp;
       this.lastMyHp[i] = car.hp;
       this.finishBonusGiven[i] = false;
       this.featureStates[i] = createBot3FeatureExtractor();
+      this.bestNavDistance[i] = this.lastNavDistance[i];
+
     }
   }
 
@@ -217,13 +222,21 @@ export class Bot3ExperienceBuffer {
     const enemy = game.cars[1 - carId];
     const finishVec = { x: center.x - car.pos.x, y: center.y - car.pos.y };
     const finishDist = Math.hypot(finishVec.x, finishVec.y);
-    const navDist = this.queryNavDistance(game.world, car.pos);
+    const navDist = queryNavDistance(game.world, car.pos);
     const prevNavDist = Number.isFinite(this.lastNavDistance[carId]) ? this.lastNavDistance[carId] : navDist;
+    const prevBest = this.bestNavDistance[carId];
     let progress = 0;
-    if (Number.isFinite(navDist) && Number.isFinite(prevNavDist)) {
-      progress = prevNavDist - navDist;
+    const navOK = Number.isFinite(navDist);
+
+    if (navOK) {
+      if (!Number.isFinite(prevBest)) {
+        this.bestNavDistance[carId] = navDist;
+      } else if (navDist < prevBest) {
+        progress = prevBest - navDist;
+        this.bestNavDistance[carId] = navDist;
+      }
     }
-    this.lastNavDistance[carId] = Number.isFinite(navDist) ? navDist : prevNavDist;
+    this.lastNavDistance[carId] = navOK ? navDist : prevNavDist;
 
     const prevEnemyHp = this.lastEnemyHp[carId] ?? enemy.hp;
     const enemyHpDelta = Math.max(0, prevEnemyHp - enemy.hp);
@@ -236,23 +249,43 @@ export class Bot3ExperienceBuffer {
     const velMag = Math.hypot(car.vel.x, car.vel.y);
     const speed = Math.min(1, velMag / 360);
 
-    let reward = Math.max(0, progress) * this.config.rewards.navProgress;
+    let reward = Math.max(0, progress) * this.config.rewards.navProgress * (1 + speed * this.config.rewards.speed);
+    const infPenalty = this.config.rewards.infNavPenalty ?? 0;
+    if (!navOK) {
+      reward -= infPenalty;
+    }
+
     reward += enemyHpDelta * this.config.rewards.damage;
     reward -= myHpDelta * this.config.rewards.damageTaken;
-    if (progress > 0) {
-      reward += speed * this.config.rewards.speed;
-    }
+
     const forwardBonusCfg = this.config.rewards.forwardBonus ?? 0;
     const backwardPenaltyCfg = this.config.rewards.backwardPenalty ?? 0;
-    if (forwardBonusCfg > 0 || backwardPenaltyCfg > 0) {
-      const forwardDirLen = Math.hypot(finishVec.x, finishVec.y);
-      if (forwardDirLen > 1e-3 && velMag > 1e-3) {
-        const dot = (car.vel.x * finishVec.x + car.vel.y * finishVec.y) / (velMag * forwardDirLen);
-        const forwardComponent = Math.max(0, dot) * (velMag / 360);
-        reward += forwardComponent * forwardBonusCfg;
-        if (dot < -0.2) {
-          reward -= Math.abs(dot) * backwardPenaltyCfg;
+
+    if (navOK && (forwardBonusCfg > 0 || backwardPenaltyCfg > 0)) {
+
+
+      const velMag = Math.hypot(car.vel.x, car.vel.y);
+      if (velMag > 1e-3) {
+        // направление, куда "смотрит" машина
+        const fx = Math.cos(car.ang);
+        const fy = Math.sin(car.ang);
+
+        // проекция скорости на направление взгляда: >0 едем вперёд, <0 едем назад
+        const vForward = car.vel.x * fx + car.vel.y * fy;
+
+        // нормируем в [-1..1] примерно, если maxSpeed=360 как у тебя
+        const vForwardNorm = clamp(vForward / 360, -1, 1);
+
+        // бонус за движение вперёд (относительно взгляда)
+        if (vForwardNorm > 0) {
+          reward += vForwardNorm * forwardBonusCfg;
         }
+
+        // штраф за движение назад (относительно взгляда)
+        if (vForwardNorm < -0.2) {
+          reward -= Math.abs(vForwardNorm) * backwardPenaltyCfg;
+        }
+
       }
     }
     reward -= this.config.rewards.timePenalty;
@@ -273,21 +306,6 @@ export class Bot3ExperienceBuffer {
     if (car.hp <= 0 && prevMyHp > 0) reward -= this.config.rewards.killBonus;
 
     return reward;
-  }
-
-  queryNavDistance(world, pos) {
-    const graph = world?.navGraph;
-    if (!graph) return Infinity;
-    const x = Math.min(Math.max(pos.x, 0), graph.worldWidth - 1);
-    const y = Math.min(Math.max(pos.y, 0), graph.worldHeight - 1);
-    const cx = Math.floor(x / graph.cellSize);
-    const cy = Math.floor(y / graph.cellSize);
-    const cols = graph.cols;
-    const rows = graph.rows;
-    if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return Infinity;
-    const idx = cy * cols + cx;
-    const dist = graph.distances[idx];
-    return Number.isFinite(dist) ? dist : Infinity;
   }
 
   afterStep(game) {
