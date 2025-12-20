@@ -31,6 +31,17 @@ const botAEl = document.getElementById("botA");
 const botBEl = document.getElementById("botB");
 const randomizeSidesEl = document.getElementById("randomizeSides");
 const mapSelectEl = document.getElementById("mapSelect");
+const sideSpoiler = document.querySelector(".side-spoiler");
+const SPOILER_BREAKPOINT = 900;
+const syncSideSpoiler = () => {
+  if (!sideSpoiler || typeof window === "undefined") return;
+  const shouldOpen = window.innerWidth >= SPOILER_BREAKPOINT;
+  if (sideSpoiler.open !== shouldOpen) sideSpoiler.open = shouldOpen;
+};
+syncSideSpoiler();
+if (typeof window !== "undefined") {
+  window.addEventListener("resize", () => requestAnimationFrame(syncSideSpoiler));
+}
 	const trainMapToggles = Array.from(document.querySelectorAll(".trainMapToggle"));
 	const SETTINGS_STORAGE_KEY = "arena.settings-v1";
 
